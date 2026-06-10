@@ -1,6 +1,6 @@
 
 fastapi
-uvicorn
+hypercorn
 sqlalchemy
 alembic
 psycopg2-binary
