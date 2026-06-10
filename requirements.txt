@@ -1,0 +1,14 @@
+
+fastapi
+uvicorn
+sqlalchemy
+alembic
+psycopg2-binary
+pydantic
+python-dotenv
+apscheduler
+openpyxl
+pandas
+requests
+beautifulsoup4
+playwright
