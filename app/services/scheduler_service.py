@@ -51,7 +51,7 @@ class SchedulerService:
     def _scrape_all_job(self):
         db = SessionLocal()
         try:
-            run_scrape(db, firm=None)
+            run_scrape(db, firm_key=None, include_disabled=False)
         finally:
             db.close()
 

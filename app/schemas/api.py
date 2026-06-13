@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # --- auth -------------------------------------------------------------------
@@ -28,9 +28,17 @@ class TokenResponse(BaseModel):
 
 # --- jobs -------------------------------------------------------------------
 
+class JobHistoryEntry(BaseModel):
+    timestamp: datetime
+    event: str
+    message: str | None = None
+    changed_fields: dict[str, Any] | None = None
+    snapshot: dict[str, Any] | None = None
+
 class JobOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
+    firm_key: str | None = None
     firm: str | None = None
     title: str | None = None
     location: str | None = None
@@ -38,8 +46,13 @@ class JobOut(BaseModel):
     pqe_level: str | None = None
     status: str | None = None
     job_url: str | None = None
+    source_reference: str | None = None
     first_seen: datetime | None = None
+    last_seen: datetime | None = None
     last_checked: datetime | None = None
+    removed_at: datetime | None = None
+    full_description: str | None = None
+    change_history: list[JobHistoryEntry] = Field(default_factory=list)
     extra_info: dict[str, Any] | None = None
 
 
@@ -53,8 +66,7 @@ class JobList(BaseModel):
 # --- firms ------------------------------------------------------------------
 
 class FirmOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
+    key: str
     name: str | None = None
     careers_url: str | None = None
     plugin: str | None = None
@@ -62,22 +74,17 @@ class FirmOut(BaseModel):
     active: bool | None = None
     last_run_at: datetime | None = None
     last_run_status: str | None = None
+    last_error: str | None = None
     total_jobs: int = 0
+    removed_jobs: int = 0
+    needs_review_jobs: int = 0
 
 
 class FirmCreate(BaseModel):
-    name: str
-    careers_url: str | None = None
-    plugin: str = "workday"
-    plugin_config: dict[str, Any] = {}
-    active: bool = True
+    name: str | None = None
 
 
 class FirmUpdate(BaseModel):
-    name: str | None = None
-    careers_url: str | None = None
-    plugin: str | None = None
-    plugin_config: dict[str, Any] | None = None
     active: bool | None = None
 
 
@@ -86,12 +93,14 @@ class FirmUpdate(BaseModel):
 class ScrapeRunOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
+    firm_key: str | None = None
     firm: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     status: str | None = None
     jobs_found: int = 0
     errors: int = 0
+    error_message: str | None = None
     logs: list[str] | None = None
 
 
@@ -103,7 +112,18 @@ class ScrapeRunList(BaseModel):
 
 
 class RunRequest(BaseModel):
-    firm_id: int | None = None
+    firm_key: str | None = None
+
+
+class PluginOut(BaseModel):
+    key: str
+    name: str
+    class_name: str
+    enabled: bool = True
+    careers_url: str | None = None
+    description: str = ""
+    required_config: list[str] = Field(default_factory=list)
+    default_config: dict[str, Any] = Field(default_factory=dict)
 
 
 # --- schedule ---------------------------------------------------------------

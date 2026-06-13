@@ -6,9 +6,9 @@ from sqlalchemy.orm import Session
 
 from app.core.security import get_current_user
 from app.database import get_db
-from app.models.firm import Firm
 from app.models.job import Job
 from app.models.scrape_run import ScrapeRun
+from app.plugins.registry import list_firm_definitions
 from app.models.user import User
 from app.schemas.api import DashboardStats
 
@@ -26,21 +26,31 @@ def dashboard(
     current_user: User = Depends(get_current_user),
 ):
     today = _today_start()
+    firms = list_firm_definitions(include_disabled=True)
 
-    total_firms = db.query(Firm).count()
+    total_firms = len(firms)
     total_live_jobs = db.query(Job).filter(Job.status != "REMOVED").count()
-    new_jobs_today = db.query(Job).filter(Job.status == "NEW", Job.last_checked >= today).count()
+    new_jobs_today = db.query(Job).filter(Job.status == "NEW", Job.first_seen >= today).count()
     updated_jobs_today = (
         db.query(Job)
-        .filter(Job.status == "UPDATED", Job.last_checked >= today)
+        .filter(Job.status.in_(["UPDATED", "REPOSTED", "NEEDS_REVIEW"]), Job.last_checked >= today)
         .count()
     )
     removed_jobs_today = (
         db.query(Job)
-        .filter(Job.status == "REMOVED", Job.last_checked >= today)
+        .filter(Job.status == "REMOVED", Job.removed_at >= today)
         .count()
     )
-    failed_sites = db.query(Firm).filter(Firm.last_run_status == "failed").count()
+    failed_sites = 0
+    for firm in firms:
+        latest_run = (
+            db.query(ScrapeRun)
+            .filter(ScrapeRun.firm_key == firm.key)
+            .order_by(ScrapeRun.started_at.desc())
+            .first()
+        )
+        if latest_run and latest_run.status == "failed":
+            failed_sites += 1
 
     jobs_by_firm_rows = (
         db.query(Job.firm, func.count(Job.id))
