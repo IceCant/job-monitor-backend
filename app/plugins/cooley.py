@@ -29,7 +29,7 @@ class CooleyPlugin(BasePlugin):
         jobs = []
         source_url = self.plugin_config.get("source_url")
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, channel="chrome")
+            browser = await p.chromium.launch(headless=True)
 
             context = await browser.new_context(
                 user_agent=(
