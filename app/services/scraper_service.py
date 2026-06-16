@@ -96,10 +96,10 @@ def _location_practice_key(location: str | None, practice_area: str | None) -> s
 
 
 def _match_key(job_url: str | None, source_reference: str | None, similarity: str | None, fallback_payload: str) -> str:
-    if job_url:
-        return f"url:{job_url}"
     if source_reference:
         return f"ref:{source_reference.lower()}"
+    if job_url:
+        return f"url:{job_url}"
     if similarity:
         return similarity
     digest = hashlib.sha1(fallback_payload.encode("utf-8")).hexdigest()[:16]
@@ -277,51 +277,103 @@ def _build_indexes(existing_jobs: list[Job]) -> dict[str, Any]:
     }
 
 
-def _pick_match(indexes: dict[str, Any], candidate: dict[str, Any]) -> tuple[Job | None, list[str]]:
+def _pick_match(
+    indexes: dict[str, Any],
+    candidate: dict[str, Any],
+) -> tuple[Job | None, list[str]]:
     issues: list[str] = []
+
     job_url = candidate["job_url"]
     source_reference = candidate["source_reference"]
     similarity = candidate["similarity_key"]
 
+    # When the scraped result has a reference number,
+    # only the same reference may represent the same job.
+    if source_reference:
+        matches = indexes["by_ref"].get(
+            source_reference.lower(),
+            [],
+        )
+
+        if len(matches) == 1:
+            return matches[0], issues
+
+        if len(matches) > 1:
+            issues.append(
+                "Multiple existing jobs share this reference number"
+            )
+            return None, issues
+
+        # Important:
+        # A new reference means a different job.
+        # Do not fall back to a shared URL or similar title.
+        return None, issues
+
+    # Only use URL matching when no reference number is available.
     if job_url:
         matches = indexes["by_url"].get(job_url, [])
-        if len(matches) == 1:
-            return matches[0], issues
-        if len(matches) > 1:
-            issues.append("Multiple existing jobs share this URL")
 
-    if source_reference:
-        matches = indexes["by_ref"].get(source_reference.lower(), [])
         if len(matches) == 1:
             return matches[0], issues
+
         if len(matches) > 1:
-            issues.append("Multiple existing jobs share this reference number")
+            issues.append(
+                "Multiple existing jobs share this URL"
+            )
 
     if similarity:
-        matches = indexes["by_similarity"].get(similarity, [])
-        if len(matches) == 1:
-            issues.append("Matched by similar title/location/practice area")
-            return matches[0], issues
-        if len(matches) > 1:
-            issues.append("Similar title/location matched multiple jobs")
+        matches = indexes["by_similarity"].get(
+            similarity,
+            [],
+        )
 
-    location_practice = _location_practice_key(candidate["location"], candidate["practice_area"])
+        if len(matches) == 1:
+            issues.append(
+                "Matched by similar title/location/practice area"
+            )
+            return matches[0], issues
+
+        if len(matches) > 1:
+            issues.append(
+                "Similar title/location matched multiple jobs"
+            )
+
+    location_practice = _location_practice_key(
+        candidate["location"],
+        candidate["practice_area"],
+    )
+
     if location_practice and candidate["title"]:
-        fuzzy_matches = []
-        for job in indexes["by_location_practice"].get(location_practice, []):
+        fuzzy_matches: list[Job] = []
+
+        for job in indexes["by_location_practice"].get(
+            location_practice,
+            [],
+        ):
             if not job.title:
                 continue
-            ratio = SequenceMatcher(None, job.title.lower(), candidate["title"].lower()).ratio()
+
+            ratio = SequenceMatcher(
+                None,
+                job.title.lower(),
+                candidate["title"].lower(),
+            ).ratio()
+
             if ratio >= 0.82:
                 fuzzy_matches.append(job)
+
         if len(fuzzy_matches) == 1:
-            issues.append("Matched by similar title with same location/practice area")
+            issues.append(
+                "Matched by similar title with same location/practice area"
+            )
             return fuzzy_matches[0], issues
+
         if len(fuzzy_matches) > 1:
-            issues.append("Fuzzy title match found multiple candidate jobs")
+            issues.append(
+                "Fuzzy title match found multiple candidate jobs"
+            )
 
     return None, issues
-
 
 def _changed_fields(job: Job, candidate: dict[str, Any]) -> dict[str, dict[str, Any]]:
     changed: dict[str, dict[str, Any]] = {}
@@ -340,15 +392,37 @@ def _changed_fields(job: Job, candidate: dict[str, Any]) -> dict[str, dict[str, 
     return changed
 
 
-def _major_change_needs_review(job: Job, candidate: dict[str, Any], changed_fields: dict[str, Any]) -> bool:
+def _major_change_needs_review(
+    job: Job,
+    candidate: dict[str, Any],
+    changed_fields: dict[str, Any],
+) -> bool:
+    # Different non-empty references mean these should not
+    # have been matched as the same job.
+    if (
+        job.source_reference
+        and candidate["source_reference"]
+        and job.source_reference.lower()
+        != candidate["source_reference"].lower()
+    ):
+        return True
+
     if "job_url" in changed_fields and job.job_url:
         return True
+
     if len(changed_fields) >= 3:
         return True
+
     if "title" in changed_fields and job.title and candidate["title"]:
-        ratio = SequenceMatcher(None, job.title.lower(), candidate["title"].lower()).ratio()
+        ratio = SequenceMatcher(
+            None,
+            job.title.lower(),
+            candidate["title"].lower(),
+        ).ratio()
+
         if ratio < 0.55:
             return True
+
     return False
 
 
