@@ -4,6 +4,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from app.plugins.base import BasePlugin
+from app.plugins.helper.helper import html_to_text
 
 
 class FriedFrankPlugin(BasePlugin):
@@ -123,7 +124,6 @@ class FriedFrankPlugin(BasePlugin):
                         "language": item.get("language"),
                         "departments": departments,
                         "offices": offices,
-                        "metadata": item.get("metadata"),
                     },
                 }
             )
@@ -145,21 +145,6 @@ def clean_text(value: Any) -> str | None:
 
     text = str(value).strip()
     return text or None
-
-
-def html_to_text(content: Any) -> str | None:
-    if not content:
-        return None
-
-    soup = BeautifulSoup(str(content), "lxml")
-
-    text = soup.get_text(
-        separator="\n",
-        strip=True,
-    )
-
-    return text or None
-
 
 def extract_names(items: Any) -> list[str]:
     if not isinstance(items, list):
