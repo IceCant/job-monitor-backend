@@ -111,6 +111,12 @@ class ScrapeRunList(BaseModel):
     page_size: int
 
 
+class ScrapeStartOut(BaseModel):
+    accepted: bool = True
+    message: str
+    firm_key: str | None = None
+
+
 class RunRequest(BaseModel):
     firm_key: str | None = None
 

@@ -1,8 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_user
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.models.scrape_run import ScrapeRun
 from app.models.user import User
 from app.plugins.registry import get_firm_definition, list_plugins
@@ -13,6 +13,7 @@ from app.schemas.api import (
     ScheduleSettingsUpdate,
     ScrapeRunList,
     ScrapeRunOut,
+    ScrapeStartOut,
 )
 from app.services.scheduler_service import scheduler_service
 from app.services.scraper_service import run_scrape
@@ -20,22 +21,39 @@ from app.services.scraper_service import run_scrape
 router = APIRouter()
 
 
+def _run_scrape_background(firm_key: str | None, include_disabled: bool) -> None:
+    db = SessionLocal()
+    try:
+        run_scrape(db, firm_key=firm_key, include_disabled=include_disabled)
+    finally:
+        db.close()
+
+
 @router.get("/plugins", response_model=list[PluginOut])
 def get_plugins(current_user: User = Depends(get_current_user)):
     return [PluginOut(**p) for p in list_plugins()]
 
 
-@router.post("/run", response_model=ScrapeRunOut)
-def run(body: RunRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+@router.post("/run", response_model=ScrapeStartOut, status_code=status.HTTP_202_ACCEPTED)
+def run(
+    body: RunRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+):
     if body.firm_key is None:
-        return run_scrape(db, firm_key=None, include_disabled=False)
+        background_tasks.add_task(_run_scrape_background, None, False)
+        return ScrapeStartOut(message="Scrape started for all enabled firms.")
 
     try:
-        get_firm_definition(body.firm_key)
+        firm = get_firm_definition(body.firm_key)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    return run_scrape(db, firm_key=body.firm_key, include_disabled=True)
+    background_tasks.add_task(_run_scrape_background, body.firm_key, True)
+    return ScrapeStartOut(
+        message=f"Scrape started for {firm.name}.",
+        firm_key=body.firm_key,
+    )
 
 
 @router.get("/runs", response_model=ScrapeRunList)

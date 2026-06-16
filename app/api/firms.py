@@ -1,17 +1,25 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_user
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.models.job import Job
 from app.models.scrape_run import ScrapeRun
 from app.plugins.registry import get_firm_definition, list_firm_definitions
 from app.models.user import User
-from app.schemas.api import FirmOut, ScrapeRunOut
+from app.schemas.api import FirmOut, ScrapeStartOut
 from app.services.scraper_service import run_scrape
 
 router = APIRouter()
+
+
+def _run_scrape_background(firm_key: str) -> None:
+    db = SessionLocal()
+    try:
+        run_scrape(db, firm_key=firm_key, include_disabled=True)
+    finally:
+        db.close()
 
 
 def _latest_run(db: Session, firm_key: str) -> ScrapeRun | None:
@@ -70,14 +78,18 @@ def get_firm(
     return _to_out(db, firm)
 
 
-@router.post("/{firm_key}/run", response_model=ScrapeRunOut)
+@router.post("/{firm_key}/run", response_model=ScrapeStartOut, status_code=status.HTTP_202_ACCEPTED)
 def run_firm_now(
     firm_key: str,
-    db: Session = Depends(get_db),
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
 ):
     try:
-        get_firm_definition(firm_key)
+        firm = get_firm_definition(firm_key)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return run_scrape(db, firm_key=firm_key, include_disabled=True)
+    background_tasks.add_task(_run_scrape_background, firm_key)
+    return ScrapeStartOut(
+        message=f"Scrape started for {firm.name}.",
+        firm_key=firm_key,
+    )
