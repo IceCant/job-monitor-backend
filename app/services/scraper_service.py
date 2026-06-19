@@ -3,7 +3,7 @@ import hashlib
 from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from collections import defaultdict
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy.orm import Session
@@ -30,15 +30,19 @@ def _ts():
     return _now().strftime("%H:%M:%S")
 
 
-async def run_firm(firm):
+async def run_firm(firm, progress_callback: Callable[[dict[str, Any]], None] | None = None):
     """Instantiate the firm's plugin and return a list of JobResult objects."""
     plugin_class = firm.plugin_class
     config = dict(getattr(plugin_class, "default_config", {}) or {})
+    kwargs = dict(config)
+    if firm.careers_url and "careers_url" not in kwargs:
+        kwargs["careers_url"] = firm.careers_url
+    if progress_callback is not None:
+        kwargs["progress_callback"] = progress_callback
     plugin = plugin_class(
         firm_name=firm.name,
         plugin_config=config,
-        careers_url=firm.careers_url,
-        **config,
+        **kwargs,
     )
 
     raw_results = await plugin.scrape()
@@ -612,7 +616,15 @@ def persist_scrape(db: Session, firm, results) -> dict:
     return counts
 
 
-def run_scrape(db: Session, firm_key: str | None = None, include_disabled: bool = False) -> ScrapeRun:
+ProgressCallback = Callable[[dict[str, Any]], None]
+
+
+def run_scrape(
+    db: Session,
+    firm_key: str | None = None,
+    include_disabled: bool = False,
+    progress_callback: ProgressCallback | None = None,
+) -> ScrapeRun:
     """Scrape one firm or all enabled firm plugins; record a ScrapeRun and return it.
 
     A single firm failing degrades the run to ``partial`` rather than raising.
@@ -636,11 +648,84 @@ def run_scrape(db: Session, firm_key: str | None = None, include_disabled: bool 
     first_error: str | None = None
     last_run: ScrapeRun | None = None
 
-    for f in firms:
+    if progress_callback:
+        progress_callback(
+            {
+                "status": "running",
+                "label": label,
+                "total_firms": len(firms),
+                "completed_firms": 0,
+                "percent": 5,
+                "current_firm_percent": 0,
+                "current_firm_stage": "Queued",
+                "message": f"Starting scrape for {label}...",
+                "logs": logs,
+            }
+        )
+
+    for index, f in enumerate(firms):
         firm_started = _now()
         firm_logs = [f"[{_ts()}] Starting scrape for {f.name}..."]
+        if progress_callback:
+            progress_callback(
+                {
+                    "status": "running",
+                    "label": label,
+                    "current_firm": f.name,
+                    "total_firms": len(firms),
+                    "completed_firms": index,
+                    "percent": max(5, round((index / len(firms)) * 100)),
+                    "current_firm_percent": 15,
+                    "current_firm_stage": "Scraping",
+                    "jobs_found": total_found,
+                    "errors": errors,
+                    "message": f"Scraping {f.name}...",
+                    "logs": logs + firm_logs,
+                }
+            )
         try:
-            results = asyncio.run(run_firm(f))
+            def on_plugin_progress(payload: dict[str, Any]) -> None:
+                if not progress_callback:
+                    return
+                firm_percent = max(15, min(70, int(payload.get("current_firm_percent", 15))))
+                progress_callback(
+                    {
+                        "status": "running",
+                        "label": label,
+                        "current_firm": f.name,
+                        "total_firms": len(firms),
+                        "completed_firms": index,
+                        "percent": max(
+                            5,
+                            round(((index + (firm_percent / 100 * 0.7)) / len(firms)) * 100),
+                        ),
+                        "current_firm_percent": firm_percent,
+                        "current_firm_stage": payload.get("current_firm_stage") or "Scraping",
+                        "jobs_found": total_found + int(payload.get("jobs_seen", 0) or 0),
+                        "errors": errors,
+                        "message": payload.get("message") or f"Scraping {f.name}...",
+                        "logs": logs + firm_logs + list(payload.get("logs") or []),
+                    }
+                )
+
+            results = asyncio.run(run_firm(f, progress_callback=on_plugin_progress))
+            if progress_callback:
+                progress_callback(
+                    {
+                        "status": "running",
+                        "label": label,
+                        "current_firm": f.name,
+                        "total_firms": len(firms),
+                        "completed_firms": index,
+                        "percent": max(10, round(((index + 0.6) / len(firms)) * 100)),
+                        "current_firm_percent": 75,
+                        "current_firm_stage": "Saving results",
+                        "jobs_found": total_found,
+                        "errors": errors,
+                        "message": f"Saving {f.name} results...",
+                        "logs": logs + firm_logs,
+                    }
+                )
             counts = persist_scrape(db, f, results)
             total_found += len(results)
             message = (
@@ -661,6 +746,23 @@ def run_scrape(db: Session, firm_key: str | None = None, include_disabled: bool 
                 errors=0,
                 logs=firm_logs + [f"[{_ts()}] Scrape completed successfully"],
             )
+            if progress_callback:
+                progress_callback(
+                    {
+                        "status": "running",
+                        "label": label,
+                        "current_firm": f.name,
+                        "total_firms": len(firms),
+                        "completed_firms": index + 1,
+                        "percent": round(((index + 1) / len(firms)) * 100),
+                        "current_firm_percent": 100,
+                        "current_firm_stage": "Complete",
+                        "jobs_found": total_found,
+                        "errors": errors,
+                        "message": message,
+                        "logs": logs,
+                    }
+                )
         except Exception as exc:  # noqa: BLE001 - record, don't crash the run
             errors += 1
             if first_error is None:
@@ -679,6 +781,23 @@ def run_scrape(db: Session, firm_key: str | None = None, include_disabled: bool 
                 logs=firm_logs,
                 error_message=str(exc),
             )
+            if progress_callback:
+                progress_callback(
+                    {
+                        "status": "running",
+                        "label": label,
+                        "current_firm": f.name,
+                        "total_firms": len(firms),
+                        "completed_firms": index + 1,
+                        "percent": round(((index + 1) / len(firms)) * 100),
+                        "current_firm_percent": 100,
+                        "current_firm_stage": "Failed",
+                        "jobs_found": total_found,
+                        "errors": errors,
+                        "message": error_message,
+                        "logs": logs,
+                    }
+                )
 
     if errors == 0:
         status = "success"
@@ -691,9 +810,26 @@ def run_scrape(db: Session, firm_key: str | None = None, include_disabled: bool 
         logs.append(f"[{_ts()}] Scrape completed with errors")
 
     if len(firms) == 1 and last_run is not None:
+        if progress_callback:
+            progress_callback(
+                {
+                    "status": status,
+                    "label": label,
+                    "current_firm": firms[0].name,
+                    "total_firms": len(firms),
+                    "completed_firms": len(firms),
+                    "percent": 100,
+                    "current_firm_percent": 100,
+                    "current_firm_stage": "Complete" if status == "success" else status.title(),
+                    "jobs_found": total_found if total_found else last_run.jobs_found,
+                    "errors": errors,
+                    "message": logs[-1] if logs else "Scrape finished",
+                    "logs": logs,
+                }
+            )
         return last_run
 
-    return _create_scrape_run(
+    run = _create_scrape_run(
         db,
         firm_key=None,
         firm_label=label,
@@ -704,3 +840,21 @@ def run_scrape(db: Session, firm_key: str | None = None, include_disabled: bool 
         logs=logs,
         error_message=first_error,
     )
+    if progress_callback:
+        progress_callback(
+            {
+                "status": status,
+                "label": label,
+                "current_firm": None,
+                "total_firms": len(firms),
+                "completed_firms": len(firms),
+                "percent": 100,
+                "current_firm_percent": 100,
+                "current_firm_stage": "Complete" if status == "success" else status.title(),
+                "jobs_found": total_found,
+                "errors": errors,
+                "message": logs[-1] if logs else "Scrape finished",
+                "logs": logs,
+            }
+        )
+    return run

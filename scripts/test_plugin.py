@@ -66,11 +66,14 @@ async def main() -> None:
             raise ValueError("--config must be a JSON object")
         config.update(inline)
 
+    kwargs = dict(config)
+    if firm.careers_url and "careers_url" not in kwargs:
+        kwargs["careers_url"] = firm.careers_url
+
     plugin = plugin_class(
         firm_name=args.firm_name or firm.name,
         plugin_config=config,
-        careers_url=firm.careers_url,
-        **config,
+        **kwargs,
     )
 
     raw_results = await plugin.scrape()

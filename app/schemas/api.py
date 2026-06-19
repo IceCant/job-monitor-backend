@@ -114,7 +114,28 @@ class ScrapeRunList(BaseModel):
 class ScrapeStartOut(BaseModel):
     accepted: bool = True
     message: str
+    run_id: str | None = None
     firm_key: str | None = None
+
+
+class ScrapeProgressOut(BaseModel):
+    run_id: str
+    status: str
+    label: str
+    firm_key: str | None = None
+    current_firm: str | None = None
+    current_firm_percent: int = 0
+    current_firm_stage: str | None = None
+    total_firms: int = 0
+    completed_firms: int = 0
+    percent: int = 0
+    jobs_found: int = 0
+    errors: int = 0
+    message: str | None = None
+    logs: list[str] = Field(default_factory=list)
+    started_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None = None
 
 
 class RunRequest(BaseModel):
@@ -130,6 +151,22 @@ class PluginOut(BaseModel):
     description: str = ""
     required_config: list[str] = Field(default_factory=list)
     default_config: dict[str, Any] = Field(default_factory=dict)
+
+
+class PluginTestRequest(BaseModel):
+    plugin_key: str
+    config: dict[str, Any] = Field(default_factory=dict)
+    firm_name: str | None = None
+    limit: int = Field(default=10, ge=1, le=100)
+
+
+class PluginTestOut(BaseModel):
+    plugin_key: str
+    firm_name: str
+    count: int
+    elapsed_ms: int
+    items: list[dict[str, Any]]
+    raw_json: str
 
 
 # --- schedule ---------------------------------------------------------------
