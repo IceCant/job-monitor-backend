@@ -208,7 +208,6 @@ class WorkdayPlugin(BasePlugin):
         return "\n".join(lines) or None
 
     @staticmethod
-    @staticmethod
     def _expected_total(data: dict[str, Any]) -> int | None:
         total = data.get("total")
         try:
