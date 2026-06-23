@@ -5,9 +5,10 @@ from typing import Any
 class BasePlugin(ABC):
     """Base contract for all scraper plugins."""
 
-    # Human/API key used to identify the firm scraper, e.g. "nrf_workday".
+    # Human/API key used to identify the firm scraper, e.g. "nrf".
     plugin_name = "base"
     display_name = "Base Plugin"
+    discoverable = True
     enabled = True
     careers_url: str | None = None
     # Optional description and config key hints shown in plugin listing API.

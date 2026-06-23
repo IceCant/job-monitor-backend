@@ -6,6 +6,7 @@ from app.plugins.workday import WorkdayPlugin
 class SimmonsSimmonsPlugin(WorkdayPlugin):
     plugin_name = "simmons_simmons"
     display_name = "Simmons & Simmons"
+    discoverable = True
     enabled = True
     careers_url = "https://wd3.myworkdaysite.com/en-US/recruiting/simmonssimmons/SimmonsSimmonsExternal"
     description = "Simmons & Simmons Workday scraper"

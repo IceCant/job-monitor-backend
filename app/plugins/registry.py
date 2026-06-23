@@ -34,6 +34,8 @@ def _discover_plugins() -> dict[str, type[BasePlugin]]:
         for _, obj in inspect.getmembers(module, inspect.isclass):
             if not issubclass(obj, BasePlugin) or obj is BasePlugin:
                 continue
+            if getattr(obj, "discoverable", True) is False:
+                continue
             key = getattr(obj, "plugin_name", None) or module_name
             plugin_map[key] = obj
 

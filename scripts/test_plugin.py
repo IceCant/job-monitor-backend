@@ -15,7 +15,7 @@ from app.plugins.registry import get_firm_definition, list_firm_definitions  # n
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one plugin directly and print JSON output.")
-    parser.add_argument("plugin", nargs="?", help="Plugin key (firm key), e.g. workday")
+    parser.add_argument("plugin", nargs="?", help="Plugin key (firm key), e.g. nrf")
     parser.add_argument("--list", action="store_true", help="List plugin keys and exit")
     parser.add_argument("--config", help="Inline JSON object to merge into default_config")
     parser.add_argument("--config-file", help="Path to a JSON config file to merge into default_config")

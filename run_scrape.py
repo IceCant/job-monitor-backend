@@ -3,7 +3,7 @@
 Run from the `backend/` directory:
 
     python run_scrape.py
-    python run_scrape.py --api-url <workday-cxs-jobs-url> --careers-url <careers-url>
+    python run_scrape.py --plugin nrf
 
 This bypasses the DB so you can confirm the scraping pipeline works on its own.
 """
@@ -17,7 +17,7 @@ from app.services.scraper_service import run_firm
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run a single firm scrape.")
-    parser.add_argument("--plugin", default="workday")
+    parser.add_argument("--plugin", default="nrf")
     parser.add_argument("--list", action="store_true", help="List available firm plugins and exit")
     return parser.parse_args()
 

@@ -27,13 +27,13 @@ def _to_optional_int(value: Any) -> int | None:
 
 class WorkdayPlugin(BasePlugin):
     plugin_name = "workday"
-    display_name = "NRF Workday"
+    display_name = "Workday"
+    discoverable = False
     enabled = True
-    careers_url = "https://nrf.wd3.myworkdayjobs.com/External"
+    careers_url = None
     description = "Scraper for Workday-powered careers APIs"
     required_config = ["api_url", "careers_url"]
     default_config = {
-        "api_url": "https://nrf.wd3.myworkdayjobs.com/wday/cxs/nrf/External/jobs",
         "max_pages": 0,
         "fetch_detail_pages": False,
         "request_timeout": 60,
