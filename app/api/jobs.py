@@ -81,6 +81,12 @@ def _filtered_query(
     changed_only: bool,
     seen_from: datetime | None,
     seen_to: datetime | None,
+    first_seen_from: datetime | None = None,
+    first_seen_to: datetime | None = None,
+    checked_from: datetime | None = None,
+    checked_to: datetime | None = None,
+    removed_from: datetime | None = None,
+    removed_to: datetime | None = None,
 ):
     query = db.query(Job)
     if search:
@@ -105,6 +111,18 @@ def _filtered_query(
         query = query.filter(Job.last_seen >= seen_from)
     if seen_to is not None:
         query = query.filter(Job.last_seen <= seen_to)
+    if first_seen_from is not None:
+        query = query.filter(Job.first_seen >= first_seen_from)
+    if first_seen_to is not None:
+        query = query.filter(Job.first_seen <= first_seen_to)
+    if checked_from is not None:
+        query = query.filter(Job.last_checked >= checked_from)
+    if checked_to is not None:
+        query = query.filter(Job.last_checked <= checked_to)
+    if removed_from is not None:
+        query = query.filter(Job.removed_at >= removed_from)
+    if removed_to is not None:
+        query = query.filter(Job.removed_at <= removed_to)
     return query
 
 
@@ -221,6 +239,12 @@ def list_jobs(
     changed_only: bool = False,
     seen_from: datetime | None = None,
     seen_to: datetime | None = None,
+    first_seen_from: datetime | None = None,
+    first_seen_to: datetime | None = None,
+    checked_from: datetime | None = None,
+    checked_to: datetime | None = None,
+    removed_from: datetime | None = None,
+    removed_to: datetime | None = None,
     sort_by: str | None = Query("last_seen"),
     sort_direction: str | None = Query("desc", pattern="^(asc|desc)$"),
     page: int = Query(1, ge=1),
@@ -229,7 +253,21 @@ def list_jobs(
     current_user: User = Depends(get_current_user),
 ):
     query = _sorted_query(
-        _filtered_query(db, search, status, firm, changed_only, seen_from, seen_to),
+        _filtered_query(
+            db,
+            search,
+            status,
+            firm,
+            changed_only,
+            seen_from,
+            seen_to,
+            first_seen_from,
+            first_seen_to,
+            checked_from,
+            checked_to,
+            removed_from,
+            removed_to,
+        ),
         sort_by,
         sort_direction,
     )
@@ -252,6 +290,12 @@ def export_jobs(
     changed_only: bool = False,
     seen_from: datetime | None = None,
     seen_to: datetime | None = None,
+    first_seen_from: datetime | None = None,
+    first_seen_to: datetime | None = None,
+    checked_from: datetime | None = None,
+    checked_to: datetime | None = None,
+    removed_from: datetime | None = None,
+    removed_to: datetime | None = None,
     field_filters: str | None = None,
     sort_by: str | None = Query("firm"),
     sort_direction: str | None = Query("asc", pattern="^(asc|desc)$"),
@@ -260,7 +304,21 @@ def export_jobs(
 ):
     rows = _sorted_query(
         _apply_export_filters(
-            _filtered_query(db, search, None, None, changed_only, seen_from, seen_to),
+            _filtered_query(
+                db,
+                search,
+                None,
+                None,
+                changed_only,
+                seen_from,
+                seen_to,
+                first_seen_from,
+                first_seen_to,
+                checked_from,
+                checked_to,
+                removed_from,
+                removed_to,
+            ),
             status or [],
             firm or [],
             field_filters,

@@ -13,14 +13,17 @@ class StephensonHarwoodPlugin(BasePlugin):
     plugin_name = "stephenson_harwood"
     display_name = "Stephenson Harwood"
     enabled = True
-    careers_url = "https://hk.linkedin.com/company/stephenson-harwood-llp/jobs"
+    careers_url = "https://www.linkedin.com/jobs/stephenson-harwood-llp-jobs-worldwide?f_C=19553"
     description = "Stephenson Harwood LinkedIn public jobs scraper"
     required_config = ["source_url"]
     default_config = {
         "source_url": "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search",
-        "keywords": "Stephenson Harwood",
+        "company_jobs_url": "https://www.linkedin.com/jobs/stephenson-harwood-llp-jobs-worldwide?f_C=19553",
+        "company_id": "19553",
+        "keywords": "Stephenson Harwood Llp",
         "location": "Worldwide",
-        "locations": [],
+        "geo_id": "92000000",
+        "locations": ["Worldwide"],
         "page_size": 10,
         "max_pages": 0,
         "fetch_detail_pages": True,
@@ -58,6 +61,57 @@ class StephensonHarwoodPlugin(BasePlugin):
         seen: set[str] = set()
         detail_pages_fetched = 0
 
+        def append_page_jobs(page_jobs: list[dict[str, Any]]) -> int:
+            nonlocal detail_pages_fetched
+            new_jobs_on_page = 0
+            for job in page_jobs:
+                reference = job["source_reference"]
+                if reference in seen:
+                    continue
+                seen.add(reference)
+                new_jobs_on_page += 1
+
+                should_fetch_detail = fetch_detail_pages and (
+                    max_detail_pages <= 0 or detail_pages_fetched < max_detail_pages
+                )
+                if should_fetch_detail:
+                    detail = self._fetch_detail(
+                        session,
+                        reference,
+                        timeout,
+                        max_retries=max_retries,
+                    )
+                    detail_pages_fetched += 1
+                    job.update(
+                        {
+                            "title": detail.get("title") or job["title"],
+                            "office_location": detail.get("office_location") or job["office_location"],
+                            "description": detail.get("description") or job["description"],
+                        }
+                    )
+                    job["extra_info"].update(detail.get("extra_info", {}))
+
+                jobs.append(job)
+                if request_delay_seconds > 0:
+                    time.sleep(request_delay_seconds)
+            return new_jobs_on_page
+
+        company_jobs_url = str(self.plugin_config.get("company_jobs_url") or "").strip()
+        if company_jobs_url:
+            response = self._get_with_retry(
+                session,
+                company_jobs_url,
+                timeout=timeout,
+                max_retries=max_retries,
+            )
+            if response is not None:
+                append_page_jobs(
+                    self._parse_search_page(
+                        response.text,
+                        query_location=str(self.plugin_config.get("location") or "Worldwide"),
+                    )
+                )
+
         for location in self._locations():
             page = 0
             start = 0
@@ -77,45 +131,16 @@ class StephensonHarwoodPlugin(BasePlugin):
                 if response is None:
                     break
 
+                raw_card_count = self._search_card_count(response.text)
                 page_jobs = self._parse_search_page(response.text, query_location=location)
-                if not page_jobs:
+                if raw_card_count == 0:
                     break
 
-                new_jobs_on_page = 0
-                for job in page_jobs:
-                    reference = job["source_reference"]
-                    if reference in seen:
-                        continue
-                    seen.add(reference)
-                    new_jobs_on_page += 1
-
-                    should_fetch_detail = fetch_detail_pages and (
-                        max_detail_pages <= 0 or detail_pages_fetched < max_detail_pages
-                    )
-                    if should_fetch_detail:
-                        detail = self._fetch_detail(
-                            session,
-                            reference,
-                            timeout,
-                            max_retries=max_retries,
-                        )
-                        detail_pages_fetched += 1
-                        job.update(
-                            {
-                                "title": detail.get("title") or job["title"],
-                                "office_location": detail.get("office_location") or job["office_location"],
-                                "description": detail.get("description") or job["description"],
-                            }
-                        )
-                        job["extra_info"].update(detail.get("extra_info", {}))
-
-                    jobs.append(job)
-                    if request_delay_seconds > 0:
-                        time.sleep(request_delay_seconds)
+                new_jobs_on_page = append_page_jobs(page_jobs)
 
                 page += 1
-                start += len(page_jobs) or page_size
-                if len(page_jobs) < page_size or new_jobs_on_page == 0:
+                start += raw_card_count or page_size
+                if new_jobs_on_page == 0:
                     break
 
         return jobs
@@ -133,11 +158,17 @@ class StephensonHarwoodPlugin(BasePlugin):
 
     def _search_params(self, *, start: int, location: str) -> dict[str, Any]:
         params: dict[str, Any] = {
-            "keywords": self.plugin_config.get("keywords") or "Stephenson Harwood",
+            "keywords": self.plugin_config.get("keywords") or "Stephenson Harwood Llp",
             "start": start,
         }
         if location:
             params["location"] = location
+        company_id = str(self.plugin_config.get("company_id") or "").strip()
+        if company_id:
+            params["f_C"] = company_id
+        geo_id = str(self.plugin_config.get("geo_id") or "").strip()
+        if geo_id:
+            params["geoId"] = geo_id
         return params
 
     def _parse_search_page(self, html: str, *, query_location: str) -> list[dict[str, Any]]:
@@ -182,6 +213,11 @@ class StephensonHarwoodPlugin(BasePlugin):
             )
 
         return jobs
+
+    @staticmethod
+    def _search_card_count(html: str) -> int:
+        soup = BeautifulSoup(html, "html.parser")
+        return len(soup.select(".job-search-card"))
 
     def _fetch_detail(
         self,

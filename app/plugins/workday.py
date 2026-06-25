@@ -128,7 +128,9 @@ class WorkdayPlugin(BasePlugin):
                     continue
                 seen_jobs.add(job_key)
                 new_jobs_on_page += 1
-                if self.fetch_detail_pages:
+                search_location = _to_optional_str(job.get("locationsText"))
+                fetch_detail = self.fetch_detail_pages or self._is_location_count(search_location)
+                if fetch_detail:
                     processed = min(offset + job_index, total_expected or offset + len(jobs))
                     self._emit_progress(
                         self._detail_percent(processed, total_expected),
@@ -136,11 +138,15 @@ class WorkdayPlugin(BasePlugin):
                         self._detail_message(processed + 1, total_expected),
                         len(all_jobs),
                     )
-                detail = self._fetch_detail(session, external_path) if self.fetch_detail_pages else {}
+                detail = self._fetch_detail(session, external_path) if fetch_detail else {}
                 info = detail.get("jobPostingInfo") or {}
                 description = (
                     self._html_to_text(info.get("jobDescription"))
                     or self._html_to_text(job.get("description"))
+                )
+                office_location, location_parts = self._location_from_workday(
+                    search_location,
+                    info,
                 )
 
                 all_jobs.append(
@@ -151,10 +157,7 @@ class WorkdayPlugin(BasePlugin):
                         ),
                         firm_name=self.firm_name,
                         title=info.get("title") or job.get("title"),
-                        office_location=job.get(
-                            "locationsText",
-                            ""
-                        ),
+                        office_location=office_location,
                         practice_area=None,
                         pqe_level=None,
                         description=description,
@@ -164,6 +167,8 @@ class WorkdayPlugin(BasePlugin):
                             "title": info.get("title") or job.get("title"),
                             "job_id": reference,
                             "bullet_fields": bullet_fields,
+                            "locations_text": search_location,
+                            "locations": location_parts,
                             "posted_on": job.get("postedOn"),
                             "start_date": info.get("startDate"),
                             "description_source": "job_detail" if description else "search_result",
@@ -197,6 +202,47 @@ class WorkdayPlugin(BasePlugin):
             return response.json()
         except (requests.RequestException, ValueError):
             return {}
+
+    @staticmethod
+    def _is_location_count(value: str | None) -> bool:
+        if not value:
+            return False
+        parts = value.strip().split()
+        return len(parts) == 2 and parts[0].isdigit() and parts[1].lower() == "locations"
+
+    @classmethod
+    def _location_from_workday(
+        cls,
+        search_location: str | None,
+        info: dict[str, Any],
+    ) -> tuple[str | None, list[str]]:
+        locations: list[str] = []
+        primary = _to_optional_str(info.get("location")) if info else None
+        if primary:
+            locations.append(primary)
+
+        additional = info.get("additionalLocations") if info else None
+        if isinstance(additional, list):
+            locations.extend(
+                text
+                for item in additional
+                if (text := _to_optional_str(item))
+            )
+
+        if not locations and not cls._is_location_count(search_location):
+            location = _to_optional_str(search_location)
+            return location, [location] if location else []
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for location in locations:
+            key = location.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(location)
+
+        return "; ".join(deduped) if deduped else _to_optional_str(search_location), deduped
 
     @staticmethod
     def _html_to_text(html: str | None) -> str | None:

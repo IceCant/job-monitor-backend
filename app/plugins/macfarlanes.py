@@ -29,6 +29,7 @@ class MacfarlanesPlugin(BasePlugin):
         "scrape_external_board": False,
         "include_unlinked_featured": False,
         "allowed_client_ids": [],
+        "default_location": "London",
         "timeout": 30,
     }
 
@@ -302,7 +303,7 @@ class MacfarlanesPlugin(BasePlugin):
             "job_url": job_url,
             "firm_name": self.firm_name,
             "title": title,
-            "office_location": office_location,
+            "office_location": office_location or self.plugin_config.get("default_location") or "London",
             "practice_area": practice_area,
             "pqe_level": None,
             "description": description,

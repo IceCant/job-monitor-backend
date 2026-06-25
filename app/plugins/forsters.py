@@ -17,6 +17,7 @@ class ForstersPlugin(BasePlugin):
     default_config = {
         "source_url": careers_url,
         "fetch_detail_pages": False,
+        "default_location": "London",
         "timeout": 30,
     }
 
@@ -24,6 +25,7 @@ class ForstersPlugin(BasePlugin):
         source_url = self.plugin_config.get("source_url") or self.careers_url
         timeout = int(self.plugin_config.get("timeout", 30))
         fetch_detail_pages = bool(self.plugin_config.get("fetch_detail_pages", False))
+        default_location = self.plugin_config.get("default_location") or "London"
 
         session = requests.Session()
         session.headers.update(
@@ -61,7 +63,7 @@ class ForstersPlugin(BasePlugin):
                     "job_url": job_url,
                     "firm_name": self.firm_name,
                     "title": detail.get("title") or title,
-                    "office_location": None,
+                    "office_location": default_location,
                     "practice_area": self._text(article, ".row span"),
                     "pqe_level": None,
                     "description": detail.get("description") or self._listing_description(article),
