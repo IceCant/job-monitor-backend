@@ -1,6 +1,7 @@
 import json
+import re
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urlencode, urljoin, urlparse, urlunparse, parse_qsl
 
 import requests
 from bs4 import BeautifulSoup
@@ -12,16 +13,22 @@ class CliffordChancePlugin(BasePlugin):
     plugin_name = "clifford_chance"
     display_name = "Clifford Chance"
     enabled = True
-    careers_url = "https://jobs.cliffordchance.com/experienced-lawyers"
-    description = "Clifford Chance experienced lawyers scraper"
+    careers_url = "https://jobs.cliffordchance.com/jobs"
+    description = "Clifford Chance jobs scraper"
     required_config = ["source_url"]
     default_config = {
         "source_url": careers_url,
         "fetch_detail_pages": True,
+        "page_size": 48,
+        "max_pages": 0,
+        "safety_max_pages": 25,
     }
 
     async def scrape(self) -> list[dict[str, Any]]:
         source_url = self.plugin_config.get("source_url") or self.careers_url
+        page_size = int(self.plugin_config.get("page_size", 48))
+        max_pages = int(self.plugin_config.get("max_pages", 0))
+        safety_max_pages = int(self.plugin_config.get("safety_max_pages", 25))
         session = requests.Session()
         session.headers.update(
             {
@@ -33,57 +40,99 @@ class CliffordChancePlugin(BasePlugin):
             }
         )
 
-        response = session.get(
-            source_url,
-            timeout=60,
-        )
-        self._prepare_response(response)
-
-        soup = BeautifulSoup(response.text, "html.parser")
         jobs: list[dict[str, Any]] = []
         seen: set[str] = set()
         fetch_detail_pages = bool(self.plugin_config.get("fetch_detail_pages", True))
+        page = 1
+        total_pages: int | None = None
 
-        for card in soup.select(".attrax-vacancy-tile"):
-            title_el = card.select_one(".attrax-vacancy-tile__title")
-            if title_el is None:
-                continue
+        while True:
+            if max_pages > 0 and page > max_pages:
+                break
+            if page > safety_max_pages:
+                break
+            if total_pages is not None and page > total_pages:
+                break
 
-            title = title_el.get_text(" ", strip=True)
-            href = (title_el.get("href") or "").strip()
-            job_url = urljoin(source_url, href)
-            reference = self._text(card, ".attrax-vacancy-tile__reference-value") or card.get("data-jobid")
-
-            if not title or not reference or reference in seen:
-                continue
-
-            seen.add(reference)
-            detail = self._fetch_detail(session, job_url) if fetch_detail_pages else {}
-            jobs.append(
-                {
-                    "job_url": job_url,
-                    "firm_name": self.firm_name,
-                    "title": detail.get("title") or title,
-                    "office_location": detail.get("office_location") or self._text(card, ".attrax-vacancy-tile__location-freetext .attrax-vacancy-tile__item-value")
-                    or self._text(card, ".attrax-vacancy-tile__option-location .attrax-vacancy-tile__item-value"),
-                    "practice_area": self._text(card, ".attrax-vacancy-tile__option-department .attrax-vacancy-tile__item-value"),
-                    "pqe_level": None,
-                    "description": detail.get("description") or self._text(card, ".attrax-vacancy-tile__description-value"),
-                    "source_reference": reference,
-                    "status": "LIVE",
-                    "extra_info": {
-                        "source": "attrax_html",
-                        "job_id": card.get("data-jobid"),
-                        "contract_type": self._text(card, ".attrax-vacancy-tile__option-contract-type .attrax-vacancy-tile__item-value"),
-                        "expiry_date": self._text(card, ".attrax-vacancy-tile__expiry-value"),
-                        "date_posted": detail.get("date_posted"),
-                        "valid_through": detail.get("valid_through"),
-                        "description_source": detail.get("description_source") or "listing_card",
-                    },
-                }
+            page_url = self._page_url(source_url, page, page_size)
+            response = session.get(
+                page_url,
+                timeout=60,
             )
+            self._prepare_response(response)
+
+            soup = BeautifulSoup(response.text, "html.parser")
+            if total_pages is None:
+                total_pages = min(self._total_pages(response.text) or 1, safety_max_pages)
+
+            cards = soup.select(".attrax-vacancy-tile")
+            if not cards:
+                break
+
+            new_jobs_on_page = 0
+            for card in cards:
+                title_el = card.select_one(".attrax-vacancy-tile__title")
+                if title_el is None:
+                    continue
+
+                title = title_el.get_text(" ", strip=True)
+                href = (title_el.get("href") or "").strip()
+                job_url = urljoin(source_url, href)
+                reference = self._text(card, ".attrax-vacancy-tile__reference-value") or card.get("data-jobid")
+
+                if not title or not reference or reference in seen:
+                    continue
+
+                seen.add(reference)
+                new_jobs_on_page += 1
+                detail = self._fetch_detail(session, job_url) if fetch_detail_pages else {}
+                jobs.append(
+                    {
+                        "job_url": job_url,
+                        "firm_name": self.firm_name,
+                        "title": detail.get("title") or title,
+                        "office_location": detail.get("office_location") or self._text(card, ".attrax-vacancy-tile__location-freetext .attrax-vacancy-tile__item-value")
+                        or self._text(card, ".attrax-vacancy-tile__option-location .attrax-vacancy-tile__item-value"),
+                        "practice_area": self._text(card, ".attrax-vacancy-tile__option-department .attrax-vacancy-tile__item-value"),
+                        "pqe_level": None,
+                        "description": detail.get("description") or self._text(card, ".attrax-vacancy-tile__description-value"),
+                        "source_reference": reference,
+                        "status": "LIVE",
+                        "extra_info": {
+                            "source": "attrax_html",
+                            "job_id": card.get("data-jobid"),
+                            "listing_page": page,
+                            "contract_type": self._text(card, ".attrax-vacancy-tile__option-contract-type .attrax-vacancy-tile__item-value"),
+                            "expiry_date": self._text(card, ".attrax-vacancy-tile__expiry-value"),
+                            "date_posted": detail.get("date_posted"),
+                            "valid_through": detail.get("valid_through"),
+                            "description_source": detail.get("description_source") or "listing_card",
+                        },
+                    }
+                )
+
+            page += 1
+            if new_jobs_on_page == 0:
+                break
 
         return jobs
+
+    @staticmethod
+    def _page_url(source_url: str, page: int, page_size: int) -> str:
+        parsed = urlparse(source_url)
+        params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        params["page"] = str(page)
+        if page_size > 0:
+            params["size"] = str(page_size)
+        return urlunparse(parsed._replace(query=urlencode(params)))
+
+    @staticmethod
+    def _total_pages(html_text: str) -> int | None:
+        pages = [
+            int(match)
+            for match in re.findall(r"pagination\((\d+)\)", html_text)
+        ]
+        return max(pages) if pages else None
 
     def _fetch_detail(self, session: requests.Session, job_url: str) -> dict[str, str | None]:
         try:
