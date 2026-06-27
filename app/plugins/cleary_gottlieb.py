@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -15,7 +15,7 @@ class ClearyGottliebPlugin(BasePlugin):
     enabled = True
     careers_url = (
         "https://legalrecruit-eu.cgsh.com/EUselfapply/viRecruitSelfApply/"
-        "RecDefault.aspx?Tag=5d51c821-ddd5-4a33-b308-11d89ef7396e"
+        "RecDefault.aspx?FilterREID=2&FilterJobCategoryID=1"
     )
     description = "Cleary Gottlieb EU viRecruit self-apply scraper"
     required_config = ["source_url"]
@@ -41,7 +41,15 @@ class ClearyGottliebPlugin(BasePlugin):
 
         response = session.get(source_url, timeout=timeout)
         response.raise_for_status()
+
+        # Cleary periodically retires viRecruit Tag URLs. Its stable qualified-lawyer
+        # filter redirects to the current tag, so recover old saved firm configs here.
+        if urlparse(response.url).hostname != "legalrecruit-eu.cgsh.com":
+            response = session.get(self.careers_url, timeout=timeout)
+            response.raise_for_status()
+
         response.encoding = "utf-8"
+        board_url = response.url
 
         soup = BeautifulSoup(response.text, "html.parser")
         jobs: list[dict[str, Any]] = []
@@ -63,7 +71,7 @@ class ClearyGottliebPlugin(BasePlugin):
 
             jobs.append(
                 {
-                    "job_url": f"{source_url}#job={reference}",
+                    "job_url": f"{board_url}#job={reference}",
                     "firm_name": self.firm_name,
                     "title": title,
                     "office_location": meta.get("Office"),
@@ -74,7 +82,7 @@ class ClearyGottliebPlugin(BasePlugin):
                     "status": "LIVE",
                     "extra_info": {
                         "source": "cleary_gottlieb_virecruit_html",
-                        "apply_url": urljoin(source_url, apply_link.get("href") or "") if apply_link else None,
+                        "apply_url": urljoin(board_url, apply_link.get("href") or "") if apply_link else None,
                         "date_posted": meta.get("Date Posted"),
                         "application_deadline": meta.get("Application Deadline"),
                     },
