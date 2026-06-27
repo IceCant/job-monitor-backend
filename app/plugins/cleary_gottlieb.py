@@ -71,7 +71,7 @@ class ClearyGottliebPlugin(BasePlugin):
 
             jobs.append(
                 {
-                    "job_url": f"{board_url}#job={reference}",
+                    "job_url": f"{self.careers_url}#job={reference}",
                     "firm_name": self.firm_name,
                     "title": title,
                     "office_location": meta.get("Office"),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -16,7 +16,7 @@ class CadwaladerPlugin(BasePlugin):
     enabled = True
     careers_url = (
         "https://recruiting.cwt.com/videsktop/viRecruitSelfApply/"
-        "RecDefault.aspx?Tag=9d075f36-8ace-4bb9-aadc-500f456a6cab"
+        "RecDefault.aspx?FilterREID=2&FilterJobCategoryID=10"
     )
     description = "Cadwalader viRecruit self-apply scraper"
     required_config = ["source_url"]
@@ -42,7 +42,15 @@ class CadwaladerPlugin(BasePlugin):
 
         response = session.get(source_url, timeout=timeout)
         response.raise_for_status()
+
+        # Cadwalader periodically retires viRecruit Tag URLs. Its stable attorney
+        # filter redirects to the current tag, so recover old saved firm configs.
+        if urlparse(response.url).hostname != "recruiting.cwt.com":
+            response = session.get(self.careers_url, timeout=timeout)
+            response.raise_for_status()
+
         response.encoding = "utf-8"
+        board_url = response.url
 
         soup = BeautifulSoup(response.text, "html.parser")
         jobs: list[dict[str, Any]] = []
@@ -64,7 +72,7 @@ class CadwaladerPlugin(BasePlugin):
 
             jobs.append(
                 {
-                    "job_url": f"{source_url}#job={reference}",
+                    "job_url": f"{self.careers_url}#job={reference}",
                     "firm_name": self.firm_name,
                     "title": title,
                     "office_location": meta.get("Office"),
@@ -75,7 +83,7 @@ class CadwaladerPlugin(BasePlugin):
                     "status": "LIVE",
                     "extra_info": {
                         "source": "cadwalader_virecruit_html",
-                        "apply_url": urljoin(source_url, apply_link.get("href") or "") if apply_link else None,
+                        "apply_url": urljoin(board_url, apply_link.get("href") or "") if apply_link else None,
                         "date_posted": meta.get("Date Posted"),
                         "application_deadline": meta.get("Application Deadline"),
                     },
