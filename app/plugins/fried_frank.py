@@ -14,7 +14,7 @@ class FriedFrankPlugin(BasePlugin):
     display_name = "Fried Frank"
     enabled = True
 
-    careers_url = "https://www.friedfrank.com/careers/attorneys"
+    careers_url = "https://www.friedfrank.com/careers/attorneyjobopportunities"
 
     description = "Fried Frank attorney jobs through Greenhouse Job Board API"
 

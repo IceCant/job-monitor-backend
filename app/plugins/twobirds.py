@@ -1,5 +1,5 @@
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -55,9 +55,12 @@ class TwoBirdsPlugin(BasePlugin):
             if not href:
                 continue
 
+            job_url = _canonical_job_url(source_url, href)
+            reference = _extract_reference(href)
+
             jobs.append(
                 {
-                    "job_url": urljoin(source_url, href),
+                    "job_url": job_url,
                     "firm_name": self.firm_name,
                     "title": title,
                     "office_location": (
@@ -76,10 +79,11 @@ class TwoBirdsPlugin(BasePlugin):
                         if card.select_one(self.plugin_config.get("description_selector", ".description"))
                         else None
                     ),
-                    "source_reference": _extract_reference(href),
+                    "source_reference": reference,
                     "status": "LIVE",
                     "extra_info": {
                         "source": "twobirds",
+                        "raw_job_url": urljoin(source_url, href),
                     },
                 }
             )
@@ -88,7 +92,52 @@ class TwoBirdsPlugin(BasePlugin):
 
 
 def _extract_reference(href: str) -> str:
-    clean = href.strip("/")
-    return clean.split("/")[-1] or clean
+    query = parse_qs(urlparse(href).query)
+    job_id = _first_query_value(query, "jobId")
+    if job_id:
+        return job_id
 
+    clean = _canonical_path_with_query(href)
+    return clean or href.strip("/")
+
+
+def _canonical_job_url(source_url: str, href: str) -> str:
+    absolute = urljoin(source_url, href)
+    parsed = urlparse(absolute)
+    query = parse_qs(parsed.query)
+    job_id = _first_query_value(query, "jobId")
+    if not job_id:
+        return urlunparse(parsed._replace(query=urlencode(_stable_query(query), doseq=True)))
+
+    stable_query = urlencode(
+        {
+            "page": "jobSpecific",
+            "jobId": job_id,
+            "srxksl": _first_query_value(query, "srxksl") or "1",
+        }
+    )
+    return urlunparse(parsed._replace(query=stable_query))
+
+
+def _canonical_path_with_query(href: str) -> str:
+    parsed = urlparse(href)
+    query = urlencode(_stable_query(parse_qs(parsed.query)), doseq=True)
+    return urlunparse(parsed._replace(query=query)).strip("/")
+
+
+def _stable_query(query: dict[str, list[str]]) -> dict[str, list[str]]:
+    volatile_keys = {"rcd", "queryString", "x-token"}
+    return {
+        key: values
+        for key, values in query.items()
+        if key not in volatile_keys
+    }
+
+
+def _first_query_value(query: dict[str, list[str]], key: str) -> str | None:
+    values = query.get(key)
+    if not values:
+        return None
+    value = str(values[0]).strip()
+    return value or None
 

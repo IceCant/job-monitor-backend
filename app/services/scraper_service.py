@@ -4,7 +4,7 @@ from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from collections import defaultdict
 from typing import Any, Callable
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from sqlalchemy.orm import Session
 
@@ -79,6 +79,40 @@ def _normalize_url(url: str | None) -> str | None:
     parsed = urlsplit(url.strip())
     path = parsed.path.rstrip("/") or "/"
     return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, parsed.query, ""))
+
+
+def _legacy_reference_aliases(value: str | None) -> list[str]:
+    if not value:
+        return []
+
+    parsed = urlsplit(value)
+    query = parse_qs(parsed.query)
+    job_ids = query.get("jobId") or query.get("jobid")
+    if not job_ids:
+        return []
+
+    aliases: list[str] = []
+    for job_id in job_ids:
+        clean = _normalize_text(job_id)
+        if clean:
+            aliases.append(clean.lower())
+    return aliases
+
+
+def _append_indexed_job(index: dict[str, list[Job]], key: str, job: Job) -> None:
+    matches = index[key]
+    if any(existing is job for existing in matches):
+        return
+    matches.append(job)
+
+
+def _matches_legacy_reference(job: Job, source_reference: str | None) -> bool:
+    if not source_reference:
+        return False
+    normalized_reference = source_reference.lower()
+    aliases = set(_legacy_reference_aliases(job.source_reference))
+    aliases.update(_legacy_reference_aliases(job.job_url))
+    return normalized_reference in aliases
 
 
 def _similarity_key(title: str | None, location: str | None, practice_area: str | None) -> str | None:
@@ -262,9 +296,13 @@ def _build_indexes(existing_jobs: list[Job]) -> dict[str, Any]:
         normalized_url = _normalize_url(job.job_url)
         if normalized_url:
             by_url[normalized_url].append(job)
+            for alias in _legacy_reference_aliases(normalized_url):
+                _append_indexed_job(by_ref, alias, job)
         ref = _normalize_text(job.source_reference)
         if ref:
-            by_ref[ref.lower()].append(job)
+            _append_indexed_job(by_ref, ref.lower(), job)
+            for alias in _legacy_reference_aliases(ref):
+                _append_indexed_job(by_ref, alias, job)
         similarity = _similarity_key(job.title, job.location, job.practice_area)
         if similarity:
             by_similarity[similarity].append(job)
@@ -408,10 +446,15 @@ def _major_change_needs_review(
         and candidate["source_reference"]
         and job.source_reference.lower()
         != candidate["source_reference"].lower()
+        and not _matches_legacy_reference(job, candidate["source_reference"])
     ):
         return True
 
-    if "job_url" in changed_fields and job.job_url:
+    if (
+        "job_url" in changed_fields
+        and job.job_url
+        and not _matches_legacy_reference(job, candidate["source_reference"])
+    ):
         return True
 
     if len(changed_fields) >= 3:
