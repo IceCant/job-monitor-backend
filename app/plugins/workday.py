@@ -38,6 +38,7 @@ class WorkdayPlugin(BasePlugin):
         "fetch_detail_pages": False,
         "request_timeout": 60,
         "detail_timeout": 20,
+        "search_text": "",
     }
 
     def __init__(
@@ -53,6 +54,7 @@ class WorkdayPlugin(BasePlugin):
         careers_url = _to_optional_str(kwargs.get("careers_url") or cfg.get("careers_url"))
         self.max_pages = _to_optional_int(kwargs.get("max_pages", cfg.get("max_pages")))
         self.fetch_detail_pages = bool(kwargs.get("fetch_detail_pages", cfg.get("fetch_detail_pages", False)))
+        self.search_text = _to_optional_str(kwargs.get("search_text", cfg.get("search_text"))) or ""
         self.progress_callback = kwargs.get("progress_callback")
         self.request_timeout = _to_optional_int(kwargs.get("request_timeout", cfg.get("request_timeout"))) or 60
         self.detail_timeout = _to_optional_int(kwargs.get("detail_timeout", cfg.get("detail_timeout"))) or 20
@@ -86,7 +88,7 @@ class WorkdayPlugin(BasePlugin):
             payload = {
                 "limit": limit,
                 "offset": offset,
-                "searchText": ""
+                "searchText": self.search_text
             }
 
             api_url = str(self.api_url)
