@@ -1,5 +1,5 @@
 from typing import Any
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -50,8 +50,9 @@ class TraversSmithPlugin(BasePlugin):
 
             title = self._clean_text(title_el.get_text(" ", strip=True))
             href = title_el.get("href") or ""
-            job_url = urljoin(source_url, href)
-            job_id = self._query_value(job_url, "jobId")
+            raw_job_url = urljoin(source_url, href)
+            job_url = self._canonical_job_url(source_url, href)
+            job_id = self._query_value(raw_job_url, "jobId")
             columns = [
                 self._clean_text(cell.get_text(" ", strip=True))
                 for cell in row.select("td.jbTableTextStyle")
@@ -64,7 +65,7 @@ class TraversSmithPlugin(BasePlugin):
                 continue
             seen.add(job_id)
 
-            detail = self._fetch_detail(session, job_url, timeout) if fetch_detail_pages else {}
+            detail = self._fetch_detail(session, raw_job_url, timeout) if fetch_detail_pages else {}
             jobs.append(
                 {
                     "job_url": job_url,
@@ -78,6 +79,7 @@ class TraversSmithPlugin(BasePlugin):
                     "status": "LIVE",
                     "extra_info": {
                         "source": "cvmail_html",
+                        "raw_job_url": raw_job_url,
                         "job_category": job_category,
                         "closing_date": detail.get("closing_date"),
                         "description_source": "detail_page" if detail.get("description") else "listing_row",
@@ -125,6 +127,32 @@ class TraversSmithPlugin(BasePlugin):
     def _query_value(url: str, name: str) -> str | None:
         values = parse_qs(urlparse(url).query).get(name)
         return values[0] if values else None
+
+    @classmethod
+    def _canonical_job_url(cls, source_url: str, href: str) -> str:
+        absolute = urljoin(source_url, href)
+        parsed = urlparse(absolute)
+        query = parse_qs(parsed.query)
+        job_id = cls._query_value(absolute, "jobId")
+        if not job_id:
+            return urlunparse(parsed._replace(query=urlencode(cls._stable_query(query), doseq=True)))
+
+        stable_query = urlencode(
+            {
+                "page": "jobSpecific",
+                "jobId": job_id,
+            }
+        )
+        return urlunparse(parsed._replace(query=stable_query))
+
+    @staticmethod
+    def _stable_query(query: dict[str, list[str]]) -> dict[str, list[str]]:
+        volatile_keys = {"rcd", "queryString", "x-token"}
+        return {
+            key: values
+            for key, values in query.items()
+            if key not in volatile_keys
+        }
 
     @staticmethod
     def _clean_text(value: str | None) -> str | None:

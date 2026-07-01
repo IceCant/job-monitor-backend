@@ -337,6 +337,13 @@ def _pick_match(
             [],
         )
 
+        exact_matches = [
+            job for job in matches
+            if (job.source_reference or "").lower() == source_reference.lower()
+        ]
+        if len(exact_matches) == 1:
+            return exact_matches[0], issues
+
         if len(matches) == 1:
             return matches[0], issues
 
@@ -578,6 +585,9 @@ def persist_scrape(db: Session, firm, results) -> dict:
         elif issues or _major_change_needs_review(matched_job, candidate, changed):
             status = STATUS_NEEDS_REVIEW
             message = "; ".join(issues or ["Significant job data change requires review"])
+        elif matched_job.status == STATUS_NEEDS_REVIEW:
+            status = STATUS_NEEDS_REVIEW
+            message = "Job changed while awaiting manual review" if changed else "Still awaiting manual review"
         elif changed:
             status = STATUS_UPDATED
             message = "Job details changed"
@@ -601,7 +611,7 @@ def persist_scrape(db: Session, firm, results) -> dict:
         matched_job.extra_info = candidate["extra_info"]
         matched_job.status = status
 
-        if status != STATUS_LIVE:
+        if status != STATUS_LIVE and message != "Still awaiting manual review":
             _record_history(
                 db,
                 matched_job,

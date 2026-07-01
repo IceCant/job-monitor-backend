@@ -378,3 +378,55 @@ def get_job(
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return _job_out(job, history=_history_out(db, job_id))
+
+
+@router.post("/{job_id}/review", response_model=JobOut)
+def mark_job_reviewed(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.status != "NEEDS_REVIEW":
+        return _job_out(job, history=_history_out(db, job_id))
+
+    reviewed_at = datetime.utcnow()
+    previous_status = job.status
+    job.status = "LIVE"
+    job.last_checked = reviewed_at
+
+    entry = JobChange(
+        job_id=job.id,
+        firm_key=job.firm_key or "unknown",
+        changed_at=reviewed_at,
+        event="REVIEWED",
+        message=f"Manual review completed by {current_user.username}",
+        changed_fields={"status": {"from": previous_status, "to": job.status}},
+        snapshot={
+            "title": job.title,
+            "location": job.location,
+            "practice_area": job.practice_area,
+            "pqe_level": job.pqe_level,
+            "job_url": job.job_url,
+            "source_reference": job.source_reference,
+            "status": job.status,
+        },
+    )
+    history = list(job.change_history or [])
+    history.append(
+        {
+            "timestamp": reviewed_at.isoformat(),
+            "event": "REVIEWED",
+            "message": entry.message,
+            "changed_fields": entry.changed_fields,
+            "snapshot": entry.snapshot,
+        }
+    )
+    job.change_history = history
+    db.add(entry)
+    db.commit()
+    db.refresh(job)
+    return _job_out(job, history=_history_out(db, job_id))
