@@ -12,7 +12,8 @@ export DATABASE_URL="postgresql+psycopg2://postgres:postgres@localhost:5432/jobm
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+alembic upgrade head
+hypercorn app.main:app --reload --bind 127.0.0.1:8000
 ```
 
 ## Plugin System
@@ -27,14 +28,13 @@ uvicorn app.main:app --reload --port 8000
 
 ## Job History
 
-Each job record keeps lifecycle history:
+Each job record has lifecycle timestamps, while event history is stored in `job_changes`:
 
 - `first_seen`
 - `last_seen`
 - `removed_at`
 - `status`
 - `full_description`
-- `change_history`
 
 Statuses used by the backend:
 
@@ -67,4 +67,3 @@ See `app/plugins/README.md` for a template plus:
 ```bash
 python3 -u scripts/smoke_test_scrape_history.py
 ```
-

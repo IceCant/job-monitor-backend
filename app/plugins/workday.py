@@ -1,5 +1,6 @@
 # app/plugins/workday.py
 
+import time
 from typing import Any
 from urllib.parse import urljoin
 
@@ -37,6 +38,7 @@ class WorkdayPlugin(BasePlugin):
         "max_pages": 0,
         "fetch_detail_pages": False,
         "request_timeout": 60,
+        "request_retries": 2,
         "detail_timeout": 20,
         "search_text": "",
     }
@@ -57,6 +59,8 @@ class WorkdayPlugin(BasePlugin):
         self.search_text = _to_optional_str(kwargs.get("search_text", cfg.get("search_text"))) or ""
         self.progress_callback = kwargs.get("progress_callback")
         self.request_timeout = _to_optional_int(kwargs.get("request_timeout", cfg.get("request_timeout"))) or 60
+        request_retries = _to_optional_int(kwargs.get("request_retries", cfg.get("request_retries")))
+        self.request_retries = request_retries if request_retries is not None else 2
         self.detail_timeout = _to_optional_int(kwargs.get("detail_timeout", cfg.get("detail_timeout"))) or 20
 
         if not api_url or not careers_url:
@@ -99,13 +103,7 @@ class WorkdayPlugin(BasePlugin):
                 len(all_jobs),
             )
 
-            response = session.post(
-                api_url,
-                json=payload,
-                timeout=self.request_timeout
-            )
-
-            response.raise_for_status()
+            response = self._post_jobs_page(session, api_url, payload)
             data = response.json()
             reported_total = self._expected_total(data)
             if reported_total is not None:
@@ -204,6 +202,32 @@ class WorkdayPlugin(BasePlugin):
             return response.json()
         except (requests.RequestException, ValueError):
             return {}
+
+    def _post_jobs_page(
+        self,
+        session: requests.Session,
+        api_url: str,
+        payload: dict[str, Any],
+    ) -> requests.Response:
+        attempts = max(1, self.request_retries + 1)
+        last_error: requests.RequestException | None = None
+        for attempt in range(attempts):
+            try:
+                response = session.post(
+                    api_url,
+                    json=payload,
+                    timeout=self.request_timeout,
+                )
+                response.raise_for_status()
+                return response
+            except requests.RequestException as exc:
+                last_error = exc
+                if attempt + 1 >= attempts:
+                    break
+                time.sleep(min(2**attempt, 5))
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Workday jobs page request failed without an exception")
 
     @staticmethod
     def _is_location_count(value: str | None) -> bool:

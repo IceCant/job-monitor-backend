@@ -11,6 +11,7 @@ from app.models.scrape_run import ScrapeRun
 from app.plugins.registry import list_firm_definitions
 from app.models.user import User
 from app.schemas.api import DashboardStats
+from app.services.reporting_service import latest_runs_by_firm
 
 router = APIRouter()
 
@@ -29,28 +30,21 @@ def dashboard(
     firms = list_firm_definitions(include_disabled=True)
 
     total_firms = len(firms)
-    total_live_jobs = db.query(Job).filter(Job.status != "REMOVED").count()
-    new_jobs_today = db.query(Job).filter(Job.status == "NEW", Job.first_seen >= today).count()
-    updated_jobs_today = (
-        db.query(Job)
-        .filter(Job.status.in_(["UPDATED", "REPOSTED", "NEEDS_REVIEW"]), Job.last_checked >= today)
-        .count()
+    job_totals = db.query(
+        func.count(Job.id).filter(Job.status != "REMOVED"),
+        func.count(Job.id).filter(Job.status == "NEW", Job.first_seen >= today),
+        func.count(Job.id).filter(
+            Job.status.in_(["UPDATED", "REPOSTED", "NEEDS_REVIEW"]),
+            Job.last_checked >= today,
+        ),
+        func.count(Job.id).filter(Job.status == "REMOVED", Job.removed_at >= today),
+    ).one()
+    total_live_jobs, new_jobs_today, updated_jobs_today, removed_jobs_today = job_totals
+
+    latest_runs = latest_runs_by_firm(db, [firm.key for firm in firms])
+    failed_sites = sum(
+        1 for run in latest_runs.values() if run.status == "failed"
     )
-    removed_jobs_today = (
-        db.query(Job)
-        .filter(Job.status == "REMOVED", Job.removed_at >= today)
-        .count()
-    )
-    failed_sites = 0
-    for firm in firms:
-        latest_run = (
-            db.query(ScrapeRun)
-            .filter(ScrapeRun.firm_key == firm.key)
-            .order_by(ScrapeRun.started_at.desc())
-            .first()
-        )
-        if latest_run and latest_run.status == "failed":
-            failed_sites += 1
 
     jobs_by_firm_rows = (
         db.query(Job.firm, func.count(Job.id))

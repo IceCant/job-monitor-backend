@@ -160,12 +160,6 @@ def _history_entry(
     }
 
 
-def _append_history(job: Job, entry: dict[str, Any]) -> None:
-    history = list(job.change_history or [])
-    history.append(entry)
-    job.change_history = history
-
-
 def _append_history_row(db: Session, job: Job, entry: dict[str, Any]) -> None:
     if job.id is None:
         return
@@ -184,7 +178,6 @@ def _append_history_row(db: Session, job: Job, entry: dict[str, Any]) -> None:
 
 
 def _record_history(db: Session, job: Job, entry: dict[str, Any]) -> None:
-    _append_history(job, entry)
     _append_history_row(db, job, entry)
 
 

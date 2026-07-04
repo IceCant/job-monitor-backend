@@ -8,6 +8,10 @@ class Job(Base):
         UniqueConstraint("firm_key", "match_key", name="uq_jobs_firm_match"),
         Index("ix_jobs_firm_key_status", "firm_key", "status"),
         Index("ix_jobs_firm_key_last_seen", "firm_key", "last_seen"),
+        Index("ix_jobs_last_seen_checked_id", "last_seen", "last_checked", "id"),
+        Index("ix_jobs_status_first_seen", "status", "first_seen"),
+        Index("ix_jobs_status_removed_at", "status", "removed_at"),
+        Index("ix_jobs_last_checked", "last_checked"),
     )
 
     id = Column(Integer, primary_key=True)

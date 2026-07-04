@@ -1,14 +1,13 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_user
 from app.database import SessionLocal, get_db
-from app.models.job import Job
 from app.models.scrape_run import ScrapeRun
 from app.plugins.registry import get_firm_definition, list_firm_definitions
 from app.models.user import User
 from app.schemas.api import FirmOut, ScrapeStartOut
+from app.services.reporting_service import job_status_counts_by_firm, latest_runs_by_firm
 from app.services.scraper_service import run_scrape
 
 router = APIRouter()
@@ -22,23 +21,7 @@ def _run_scrape_background(firm_key: str) -> None:
         db.close()
 
 
-def _latest_run(db: Session, firm_key: str) -> ScrapeRun | None:
-    return (
-        db.query(ScrapeRun)
-        .filter(ScrapeRun.firm_key == firm_key)
-        .order_by(ScrapeRun.started_at.desc())
-        .first()
-    )
-
-
-def _to_out(db: Session, firm) -> FirmOut:
-    counts = dict(
-        db.query(Job.status, func.count(Job.id))
-        .filter(Job.firm_key == firm.key)
-        .group_by(Job.status)
-        .all()
-    )
-    latest_run = _latest_run(db, firm.key)
+def _to_out(firm, counts: dict[str, int], latest_run: ScrapeRun | None) -> FirmOut:
     return FirmOut(
         key=firm.key,
         name=firm.name,
@@ -60,7 +43,14 @@ def list_firms(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return [_to_out(db, firm) for firm in list_firm_definitions(include_disabled=True)]
+    firms = list_firm_definitions(include_disabled=True)
+    firm_keys = [firm.key for firm in firms]
+    counts_by_firm = job_status_counts_by_firm(db, firm_keys)
+    runs_by_firm = latest_runs_by_firm(db, firm_keys)
+    return [
+        _to_out(firm, counts_by_firm.get(firm.key, {}), runs_by_firm.get(firm.key))
+        for firm in firms
+    ]
 
 
 @router.get("/{firm_key}", response_model=FirmOut)
@@ -75,7 +65,9 @@ def get_firm(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if firm is None:
         raise HTTPException(status_code=404, detail="Firm not found")
-    return _to_out(db, firm)
+    counts = job_status_counts_by_firm(db, [firm.key]).get(firm.key, {})
+    latest_run = latest_runs_by_firm(db, [firm.key]).get(firm.key)
+    return _to_out(firm, counts, latest_run)
 
 
 @router.post("/{firm_key}/run", response_model=ScrapeStartOut, status_code=status.HTTP_202_ACCEPTED)

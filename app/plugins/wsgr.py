@@ -112,12 +112,16 @@ class WSGRPlugin(BasePlugin):
         terms = self._terms(post)
         slug = str(post.get("slug") or self._slug_from_url(job_url))
         listed = listing_meta.get(slug, {})
+        office_location, locations = self._office_location(
+            listed.get("office_location"),
+            description or excerpt or "",
+        )
 
         return {
             "job_url": job_url,
             "firm_name": self.firm_name,
             "title": title,
-            "office_location": listed.get("office_location") or self._location_from_text(description or excerpt or ""),
+            "office_location": office_location,
             "practice_area": listed.get("practice_area") or terms.get("department"),
             "pqe_level": None,
             "description": description or listed.get("excerpt") or excerpt,
@@ -131,6 +135,7 @@ class WSGRPlugin(BasePlugin):
                 "contract_type": terms.get("contract_type"),
                 "date": post.get("date"),
                 "modified": post.get("modified"),
+                "locations": locations,
             },
         }
 
@@ -202,6 +207,145 @@ class WSGRPlugin(BasePlugin):
             if match:
                 return match.group(1).strip()
         return None
+
+    @classmethod
+    def _office_location(cls, listed_location: str | None, text: str) -> tuple[str | None, list[str]]:
+        listed = cls._clean_location(listed_location)
+        if listed and listed.casefold() != "multiple locations":
+            locations = cls._split_locations(listed)
+            if len(locations) > 1:
+                return "; ".join(locations), locations
+            return listed, locations
+
+        locations = cls._locations_from_text(text)
+        if locations:
+            return "; ".join(locations), locations
+
+        fallback = cls._location_from_text(text)
+        if fallback:
+            locations = cls._split_locations(fallback)
+            return "; ".join(locations), locations
+
+        if listed and listed.casefold() == "multiple locations":
+            return "Multiple WSGR offices", ["Multiple WSGR offices"]
+        return listed or "Location not specified", cls._split_locations(listed)
+
+    @classmethod
+    def _locations_from_text(cls, text: str) -> list[str]:
+        normalized = cls._clean_location(text) or ""
+        if not normalized:
+            return []
+
+        location_sets: list[list[str]] = []
+
+        for pattern in [
+            r"preferred locations? (?:are|include)\s+(.+?)(?:Compensation and Benefits|Salary range|Discretionary merit|$)",
+            r"(?:team|group) is located in our\s+(.+?)\s+offices?",
+            r"you may sit in\s+(.+?)(?:\.|;)",
+            r"would welcome attorneys who want to join the team in those locations",
+        ]:
+            match = re.search(pattern, normalized, flags=re.IGNORECASE)
+            if match:
+                if match.lastindex:
+                    location_sets.append(cls._split_locations(match.group(1)))
+                else:
+                    window = normalized[max(0, match.start() - 180): match.start()]
+                    location_sets.append(cls._split_locations(window))
+
+        primary_match = re.search(
+            r"primary location for this job posting is in ([^.]+?)(?:, but other locations may be listed)?\.",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        primary = cls._split_locations(primary_match.group(1)) if primary_match else []
+
+        pay_section = ""
+        pay_match = re.search(
+            r"anticipated pay range for this position is as follows:\s+(.+?)(?:The compensation|Benefits information|Equal Opportunity|$)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if pay_match:
+            pay_section = pay_match.group(1)
+
+        pay_locations = cls._locations_from_pay_ranges(pay_section)
+        if primary and pay_locations:
+            return cls._dedupe_locations(primary + pay_locations)
+        if pay_locations:
+            return pay_locations
+        for values in location_sets:
+            if values:
+                return values
+        return primary
+
+    @classmethod
+    def _locations_from_pay_ranges(cls, text: str) -> list[str]:
+        if not text:
+            return []
+        locations: list[str] = []
+        for chunk in re.finditer(r"([^:.]+):\s*\$[\d,]+", text):
+            before_colon = chunk.group(1)
+            segment = re.split(r"(?:per year|per hour)\.?", before_colon)[-1]
+            locations.extend(cls._split_locations(segment))
+        return cls._dedupe_locations(locations)
+
+    @classmethod
+    def _split_locations(cls, value: str | None) -> list[str]:
+        cleaned = cls._clean_location(value)
+        if not cleaned:
+            return []
+
+        cleaned = re.sub(r"\ball other locations\b", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\bother locations\b", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\band all\b", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\bWashington\s*,?\s*D\.?C\.?(?=[\s,.;]|$)", "Washington__DC__", cleaned)
+        cleaned = re.sub(r"\bDC\b", "Washington__DC__", cleaned)
+        cleaned = re.sub(r"\bSalt Lake(?! City\b)", "Salt Lake City", cleaned)
+        cleaned = re.sub(r"\s+or\s+", ", ", cleaned)
+        cleaned = cleaned.replace(" and ", ", ")
+        pieces = [
+            part.strip(" ,;.")
+            for part in re.split(r"\s*,\s*|\s*;\s*", cleaned)
+            if part.strip(" ,;.")
+        ]
+
+        locations: list[str] = []
+        index = 0
+        while index < len(pieces):
+            part = pieces[index]
+            if part.casefold() == "and":
+                index += 1
+                continue
+            if part == "Washington__DC__":
+                locations.append("Washington, D.C.")
+                index += 1
+                continue
+            locations.append(part.replace("Washington__DC__", "Washington, D.C."))
+            index += 1
+
+        return cls._dedupe_locations(locations)
+
+    @staticmethod
+    def _dedupe_locations(locations: list[str]) -> list[str]:
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for location in locations:
+            normalized = " ".join(location.split()).strip(" ,;")
+            if not normalized:
+                continue
+            key = normalized.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(normalized)
+        return deduped
+
+    @staticmethod
+    def _clean_location(value: str | None) -> str | None:
+        if not value:
+            return None
+        text = " ".join(str(value).replace("\xa0", " ").split())
+        return text.strip(" ,;") or None
 
     @staticmethod
     def _html_to_text(html_text: str | None) -> str | None:

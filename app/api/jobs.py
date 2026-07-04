@@ -6,7 +6,7 @@ from typing import Any
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, or_
+from sqlalchemy import String, and_, cast, or_
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_user
@@ -78,6 +78,7 @@ def _filtered_query(
     search: str | None,
     status: str | None,
     firm: str | None,
+    location: str | None,
     changed_only: bool,
     seen_from: datetime | None,
     seen_to: datetime | None,
@@ -105,6 +106,14 @@ def _filtered_query(
         query = query.filter(Job.status == status.upper())
     if firm and firm.lower() != "all":
         query = query.filter(or_(Job.firm == firm, Job.firm_key == firm))
+    if location and location.lower() != "all":
+        location_like = f"%{location}%"
+        query = query.filter(
+            or_(
+                Job.location.ilike(location_like),
+                cast(Job.extra_info["locations"], String).ilike(location_like),
+            )
+        )
     if changed_only:
         query = query.filter(Job.status.in_(["UPDATED", "REPOSTED", "NEEDS_REVIEW"]))
     if seen_from is not None:
@@ -124,6 +133,24 @@ def _filtered_query(
     if removed_to is not None:
         query = query.filter(Job.removed_at <= removed_to)
     return query
+
+
+def _location_parts(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [part.strip() for part in value.split(";") if part.strip()]
+
+
+def _extra_location_parts(extra_info: Any) -> list[str]:
+    locations = extra_info.get("locations") if isinstance(extra_info, dict) else extra_info
+    if isinstance(locations, str):
+        try:
+            locations = json.loads(locations)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(locations, list):
+        return []
+    return [str(location).strip() for location in locations if str(location).strip()]
 
 
 def _sorted_query(query, sort_by: str | None, sort_direction: str | None):
@@ -236,6 +263,7 @@ def list_jobs(
     search: str | None = None,
     status: str | None = None,
     firm: str | None = None,
+    location: str | None = None,
     changed_only: bool = False,
     seen_from: datetime | None = None,
     seen_to: datetime | None = None,
@@ -258,6 +286,7 @@ def list_jobs(
             search,
             status,
             firm,
+            location,
             changed_only,
             seen_from,
             seen_to,
@@ -281,12 +310,47 @@ def list_jobs(
     )
 
 
+@router.get("/location-options")
+def list_job_location_options(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    location_rows = (
+        db.query(Job.location)
+        .filter(and_(Job.location.is_not(None), Job.location != ""))
+        .distinct()
+        .all()
+    )
+    extra_locations = cast(Job.extra_info["locations"], String)
+    extra_location_rows = (
+        db.query(extra_locations)
+        .filter(Job.extra_info.is_not(None))
+        .distinct()
+        .all()
+    )
+    options = sorted(
+        {
+            location_part
+            for (raw_location,) in location_rows
+            for location_part in _location_parts(raw_location)
+        }
+        | {
+            location_part
+            for (extra_info_locations,) in extra_location_rows
+            for location_part in _extra_location_parts(extra_info_locations)
+        },
+        key=str.casefold,
+    )
+    return {"items": options}
+
+
 @router.get("/export")
 def export_jobs(
     format: str = Query("csv", pattern="^(csv|xlsx)$"),
     search: str | None = None,
     status: list[str] | None = Query(default=None),
     firm: list[str] | None = Query(default=None),
+    location: str | None = None,
     changed_only: bool = False,
     seen_from: datetime | None = None,
     seen_to: datetime | None = None,
@@ -309,6 +373,7 @@ def export_jobs(
                 search,
                 None,
                 None,
+                location,
                 changed_only,
                 seen_from,
                 seen_to,
@@ -415,17 +480,6 @@ def mark_job_reviewed(
             "status": job.status,
         },
     )
-    history = list(job.change_history or [])
-    history.append(
-        {
-            "timestamp": reviewed_at.isoformat(),
-            "event": "REVIEWED",
-            "message": entry.message,
-            "changed_fields": entry.changed_fields,
-            "snapshot": entry.snapshot,
-        }
-    )
-    job.change_history = history
     db.add(entry)
     db.commit()
     db.refresh(job)

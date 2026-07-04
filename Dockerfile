@@ -7,4 +7,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["sh", "-c", "hypercorn app.main:app --bind 0.0.0.0:${PORT:-8000}"]
+CMD ["sh", "-c", "alembic upgrade head && hypercorn app.main:app --bind 0.0.0.0:${PORT:-8000}"]
