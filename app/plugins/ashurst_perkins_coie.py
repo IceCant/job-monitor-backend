@@ -15,6 +15,7 @@ class AshurstPerkinsCoiePlugin(BasePlugin):
     enabled = True
     careers_url = "https://fsr.cvmailuk.com/ashurstperkinscoiecareers/main.cfm?srxksl=1"
     description = "Ashurst Perkins Coie CVMail careers scraper"
+    source_name = "ashurst_perkins_coie_cvmail_html"
     required_config = ["source_url"]
     default_config: dict[str, Any] = {
         "source_url": careers_url,
@@ -102,6 +103,7 @@ class AshurstPerkinsCoiePlugin(BasePlugin):
 
             cells = [self._clean_text(cell.get_text(" ", strip=True)) for cell in row.select("td.jbTableTextStyle")]
             listing_location = cells[-1] if len(cells) > 1 else None
+            listing_practice_area = cells[-2] if len(cells) > 2 else None
             job_url = self._canonical_job_url(source_url, href)
             detail = self._fetch_detail(session, raw_job_url, detail_timeout) if fetch_detail_pages else {}
 
@@ -112,16 +114,17 @@ class AshurstPerkinsCoiePlugin(BasePlugin):
                     "firm_name": self.firm_name,
                     "title": detail.get("title") or title,
                     "office_location": detail.get("location") or listing_location,
-                    "practice_area": detail.get("practice_area"),
+                    "practice_area": detail.get("practice_area") or listing_practice_area,
                     "pqe_level": detail.get("pqe_level"),
                     "description": detail.get("description"),
                     "source_reference": job_id,
                     "status": "LIVE",
                     "extra_info": {
-                        "source": "ashurst_perkins_coie_cvmail_html",
+                        "source": self.source_name,
                         "source_detail_url": job_url,
                         "listing_page": page,
                         "listing_location": listing_location,
+                        "listing_practice_area": listing_practice_area,
                         "closing_date": detail.get("closing_date"),
                         "description_source": "detail_page" if detail.get("description") else "listing_row",
                     },
