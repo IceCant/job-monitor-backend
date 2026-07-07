@@ -41,6 +41,17 @@ class WombleBondDickinsonPluginTests(unittest.TestCase):
         ):
             asyncio.run(self.plugin.scrape())
 
+    def test_browser_grid_url_preserves_pagestamp_and_adds_layout(self) -> None:
+        url = self.plugin._browser_grid_url(
+            "https://jobs.wbd-uk.com/jobs/vacancy/find/results/",
+            "/jobs/vacancy/find/results/ajaxaction/posbrowser_gridhandler/"
+            "?pagestamp=abc-123",
+        )
+
+        self.assertIn("pagestamp=abc-123", url)
+        self.assertIn("pageWidthInput=1440", url)
+        self.assertIn("inDialog=false", url)
+
 
 if __name__ == "__main__":
     unittest.main()

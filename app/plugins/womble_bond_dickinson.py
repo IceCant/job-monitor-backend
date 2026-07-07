@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
+from playwright.async_api import (
+    TimeoutError as PlaywrightTimeoutError,
+    async_playwright,
+)
 
 from app.plugins.base import BasePlugin
 
@@ -16,7 +19,7 @@ class WombleBondDickinsonScrapeError(RuntimeError):
 
 
 class WombleBondDickinsonPlugin(BasePlugin):
-    diagnostic_version = "2026-07-07.2"
+    diagnostic_version = "2026-07-07.3"
     plugin_name = "womble_bond_dickinson"
     display_name = "Womble Bond Dickinson"
     discoverable = True
@@ -226,10 +229,47 @@ class WombleBondDickinsonPlugin(BasePlugin):
                     percent=45,
                     stage="Browser fallback",
                 )
-                await page.locator(".ListGridContainer .rowContainer").first.wait_for(
-                    state="attached",
-                    timeout=timeout_ms,
+                rows_ready = await self._wait_for_browser_rows(
+                    page,
+                    timeout_ms=min(timeout_ms, 10_000),
                 )
+                if not rows_ready:
+                    # AWS WAF returned its challenge inside an XHR. Opening the
+                    # same temporary endpoint as a document lets its JavaScript
+                    # run and obtain the normal aws-waf-token session cookie.
+                    landing_html = await page.content()
+                    endpoint = self._grid_endpoint(landing_html)
+                    if not endpoint:
+                        raise WombleBondDickinsonScrapeError(
+                            "WBD grid endpoint disappeared before browser retry"
+                        )
+                    grid_url = self._browser_grid_url(page.url, endpoint)
+                    self._report(
+                        "job rows did not load through AJAX; opening the grid "
+                        "as a top-level page for the AWS WAF challenge",
+                        percent=48,
+                        stage="AWS verification",
+                    )
+                    grid_navigation = await page.goto(
+                        grid_url,
+                        wait_until="domcontentloaded",
+                        timeout=timeout_ms,
+                    )
+                    self._report(
+                        "Chromium grid navigation: "
+                        f"status={grid_navigation.status if grid_navigation else 'unknown'}, "
+                        f"url={page.url}",
+                        percent=50,
+                        stage="AWS verification",
+                    )
+                    rows_ready = await self._wait_for_browser_rows(
+                        page,
+                        timeout_ms=timeout_ms,
+                    )
+                if not rows_ready:
+                    raise WombleBondDickinsonScrapeError(
+                        await self._browser_challenge_message(page)
+                    )
 
                 for page_number in range(1, safety_max_pages + 1):
                     html = await page.content()
@@ -304,6 +344,49 @@ class WombleBondDickinsonPlugin(BasePlugin):
             jobs_seen=len(jobs),
         )
         return jobs
+
+    @staticmethod
+    async def _wait_for_browser_rows(page: Any, timeout_ms: int) -> bool:
+        try:
+            await page.locator(
+                ".ListGridContainer .rowContainer"
+            ).first.wait_for(
+                state="attached",
+                timeout=timeout_ms,
+            )
+            return True
+        except PlaywrightTimeoutError:
+            return False
+
+    @staticmethod
+    def _browser_grid_url(page_url: str, endpoint: str) -> str:
+        params = urlencode(
+            {
+                "pageWidthInput": 1440,
+                "availableWidthInput": 1200,
+                "gadgetsWidthInput": 0,
+                "viewMode": "",
+                "inDialog": "false",
+            }
+        )
+        separator = "&" if "?" in endpoint else "?"
+        return urljoin(page_url, f"{endpoint}{separator}{params}")
+
+    @classmethod
+    async def _browser_challenge_message(cls, page: Any) -> str:
+        cookies = await page.context.cookies()
+        cookie_names = sorted(
+            str(cookie.get("name"))
+            for cookie in cookies
+            if cookie.get("name")
+        )
+        content = BeautifulSoup(await page.content(), "lxml")
+        body_text = cls._clean(content.get_text(" ", strip=True)) or ""
+        return (
+            "WBD browser did not receive job rows after AWS verification "
+            f"(url={page.url}, cookies={cookie_names}, "
+            f"preview={body_text[:220] or 'empty'})"
+        )
 
     def _report(
         self,
