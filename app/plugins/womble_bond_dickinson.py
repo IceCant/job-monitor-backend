@@ -19,7 +19,7 @@ class WombleBondDickinsonScrapeError(RuntimeError):
 
 
 class WombleBondDickinsonPlugin(BasePlugin):
-    diagnostic_version = "2026-07-07.3"
+    diagnostic_version = "2026-07-07.4"
     plugin_name = "womble_bond_dickinson"
     display_name = "Womble Bond Dickinson"
     discoverable = True
@@ -314,20 +314,30 @@ class WombleBondDickinsonPlugin(BasePlugin):
                     if is_disabled:
                         break
 
-                    old_signature = await self._browser_page_signature(page)
-                    await next_link.click()
-                    await page.wait_for_function(
-                        """
-                        previous => {
-                            const current = Array.from(
-                                document.querySelectorAll('.ListGridContainer input.rowId[value]')
-                            ).map(element => element.value).join('|');
-                            return current && current !== previous;
-                        }
-                        """,
-                        arg=old_signature,
+                    next_href = await next_link.get_attribute("href")
+                    if not next_href:
+                        break
+                    next_url = urljoin(page.url, next_href)
+                    next_navigation = await page.goto(
+                        next_url,
+                        wait_until="domcontentloaded",
                         timeout=timeout_ms,
                     )
+                    self._report(
+                        f"Chromium page {page_number + 1} navigation: "
+                        f"status={next_navigation.status if next_navigation else 'unknown'}, "
+                        f"url={page.url}",
+                        percent=min(50 + page_number * 5, 70),
+                        stage="Browser pagination",
+                        jobs_seen=len(jobs),
+                    )
+                    if not await self._wait_for_browser_rows(
+                        page,
+                        timeout_ms=timeout_ms,
+                    ):
+                        raise WombleBondDickinsonScrapeError(
+                            await self._browser_challenge_message(page)
+                        )
                 else:
                     raise WombleBondDickinsonScrapeError(
                         f"WBD browser pagination exceeded safety_max_pages={safety_max_pages}"
@@ -423,14 +433,6 @@ class WombleBondDickinsonPlugin(BasePlugin):
             f"cloudfront_pop={response.headers.get('x-amz-cf-pop') or 'unknown'}",
             percent=percent,
             stage="Loading results",
-        )
-
-    @staticmethod
-    async def _browser_page_signature(page: Any) -> str:
-        return await page.locator(
-            ".ListGridContainer input.rowId[value]"
-        ).evaluate_all(
-            "elements => elements.map(element => element.value).join('|')"
         )
 
     def _append_jobs(
