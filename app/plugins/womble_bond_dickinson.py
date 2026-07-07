@@ -16,6 +16,7 @@ class WombleBondDickinsonScrapeError(RuntimeError):
 
 
 class WombleBondDickinsonPlugin(BasePlugin):
+    diagnostic_version = "2026-07-07.2"
     plugin_name = "womble_bond_dickinson"
     display_name = "Womble Bond Dickinson"
     discoverable = True
@@ -35,6 +36,11 @@ class WombleBondDickinsonPlugin(BasePlugin):
         timeout = int(self.plugin_config.get("timeout", 60))
         max_pages = int(self.plugin_config.get("max_pages", 0))
         safety_max_pages = int(self.plugin_config.get("safety_max_pages", 100))
+        self._report(
+            f"starting; source={source_url}; timeout={timeout}s",
+            percent=10,
+            stage="Connecting",
+        )
 
         http_error: Exception | None = None
         try:
@@ -46,6 +52,11 @@ class WombleBondDickinsonPlugin(BasePlugin):
             )
         except Exception as exc:  # WBD sometimes blocks cloud HTTP clients.
             http_error = exc
+            self._report(
+                f"HTTP path failed: {exc}; starting Chromium fallback",
+                percent=35,
+                stage="Browser fallback",
+            )
 
         try:
             return await self._scrape_with_browser(
@@ -55,6 +66,11 @@ class WombleBondDickinsonPlugin(BasePlugin):
                 safety_max_pages=safety_max_pages,
             )
         except Exception as browser_error:
+            self._report(
+                f"Chromium fallback failed: {browser_error}",
+                percent=70,
+                stage="Failed",
+            )
             raise WombleBondDickinsonScrapeError(
                 "WBD HTTP scrape failed "
                 f"({http_error}); browser fallback also failed ({browser_error})"
@@ -86,10 +102,16 @@ class WombleBondDickinsonPlugin(BasePlugin):
         )
 
         response = session.get(source_url, timeout=timeout)
+        self._report_response("HTTP landing page", response, percent=15)
         self._prepare_response(response)
         endpoint = self._grid_endpoint(response.text)
         if not endpoint:
             raise ValueError("Womble Bond Dickinson results endpoint was not found")
+        self._report(
+            "temporary grid endpoint detected",
+            percent=20,
+            stage="Loading results",
+        )
 
         jobs: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -120,9 +142,22 @@ class WombleBondDickinsonPlugin(BasePlugin):
                 },
                 timeout=timeout,
             )
+            self._report_response(
+                f"HTTP grid page {page}",
+                grid_response,
+                percent=min(30 + page * 5, 65),
+            )
             self._prepare_response(grid_response)
             soup = BeautifulSoup(grid_response.text, "lxml")
+            raw_rows = len(soup.select(".ListGridContainer .rowContainer"))
             new_on_page = self._append_jobs(soup, grid_response.url, page, jobs, seen)
+            self._report(
+                f"HTTP grid page {page}: rows={raw_rows}, "
+                f"new={new_on_page}, total={len(jobs)}",
+                percent=min(35 + page * 5, 70),
+                stage="Parsing results",
+                jobs_seen=len(jobs),
+            )
             if new_on_page == 0:
                 if page == 1:
                     raise WombleBondDickinsonScrapeError(
@@ -137,6 +172,12 @@ class WombleBondDickinsonPlugin(BasePlugin):
             raise WombleBondDickinsonScrapeError(
                 "WBD returned no jobs from its results endpoint"
             )
+        self._report(
+            f"HTTP path complete: jobs={len(jobs)}",
+            percent=70,
+            stage="Results ready",
+            jobs_seen=len(jobs),
+        )
         return jobs
 
     async def _scrape_with_browser(
@@ -150,6 +191,11 @@ class WombleBondDickinsonPlugin(BasePlugin):
         timeout_ms = timeout * 1000
         jobs: list[dict[str, Any]] = []
         seen: set[str] = set()
+        self._report(
+            "launching headless Chromium",
+            percent=40,
+            stage="Browser fallback",
+        )
 
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(
@@ -168,7 +214,18 @@ class WombleBondDickinsonPlugin(BasePlugin):
                 )
                 page = await context.new_page()
                 page.set_default_timeout(timeout_ms)
-                await page.goto(source_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                navigation = await page.goto(
+                    source_url,
+                    wait_until="domcontentloaded",
+                    timeout=timeout_ms,
+                )
+                self._report(
+                    "Chromium landing page: "
+                    f"status={navigation.status if navigation else 'unknown'}, "
+                    f"url={page.url}",
+                    percent=45,
+                    stage="Browser fallback",
+                )
                 await page.locator(".ListGridContainer .rowContainer").first.wait_for(
                     state="attached",
                     timeout=timeout_ms,
@@ -177,12 +234,22 @@ class WombleBondDickinsonPlugin(BasePlugin):
                 for page_number in range(1, safety_max_pages + 1):
                     html = await page.content()
                     soup = BeautifulSoup(html, "lxml")
+                    raw_rows = len(
+                        soup.select(".ListGridContainer .rowContainer")
+                    )
                     new_on_page = self._append_jobs(
                         soup,
                         page.url,
                         page_number,
                         jobs,
                         seen,
+                    )
+                    self._report(
+                        f"Chromium page {page_number}: rows={raw_rows}, "
+                        f"new={new_on_page}, total={len(jobs)}",
+                        percent=min(45 + page_number * 5, 70),
+                        stage="Browser parsing",
+                        jobs_seen=len(jobs),
                     )
                     if new_on_page == 0:
                         raise WombleBondDickinsonScrapeError(
@@ -230,7 +297,50 @@ class WombleBondDickinsonPlugin(BasePlugin):
 
         if not jobs:
             raise WombleBondDickinsonScrapeError("WBD browser fallback returned no jobs")
+        self._report(
+            f"Chromium path complete: jobs={len(jobs)}",
+            percent=70,
+            stage="Results ready",
+            jobs_seen=len(jobs),
+        )
         return jobs
+
+    def _report(
+        self,
+        message: str,
+        *,
+        percent: int,
+        stage: str,
+        jobs_seen: int = 0,
+    ) -> None:
+        line = f"[WBD {self.diagnostic_version}] {message}"
+        print(line, flush=True)
+        callback = self.kwargs.get("progress_callback")
+        if callable(callback):
+            callback(
+                {
+                    "current_firm_percent": percent,
+                    "current_firm_stage": stage,
+                    "message": line,
+                    "jobs_seen": jobs_seen,
+                    "logs": [line],
+                }
+            )
+
+    def _report_response(
+        self,
+        label: str,
+        response: requests.Response,
+        *,
+        percent: int,
+    ) -> None:
+        self._report(
+            f"{label}: status={response.status_code}, "
+            f"bytes={len(response.content)}, url={response.url}, "
+            f"cloudfront_pop={response.headers.get('x-amz-cf-pop') or 'unknown'}",
+            percent=percent,
+            stage="Loading results",
+        )
 
     @staticmethod
     async def _browser_page_signature(page: Any) -> str:

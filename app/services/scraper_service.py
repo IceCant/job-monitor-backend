@@ -1,9 +1,12 @@
 import asyncio
 import hashlib
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from collections import defaultdict
-from typing import Any, Callable
+from typing import Any, Callable, Iterable, Iterator
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from sqlalchemy.orm import Session
@@ -665,6 +668,73 @@ def persist_scrape(db: Session, firm, results) -> dict:
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 
+@dataclass
+class _FirmScrapeOutcome:
+    firm: Any
+    started_at: datetime
+    results: list[JobResult] | None = None
+    error: Exception | None = None
+    logs: list[str] = field(default_factory=list)
+
+
+def _run_firm_sync(
+    firm: Any,
+    progress_callback: ProgressCallback | None = None,
+) -> _FirmScrapeOutcome:
+    started_at = _now()
+    plugin_logs: list[str] = []
+
+    def capture_progress(payload: dict[str, Any]) -> None:
+        for entry in payload.get("logs") or []:
+            line = str(entry).strip()
+            if line and (not plugin_logs or plugin_logs[-1] != line):
+                plugin_logs.append(line)
+        if len(plugin_logs) > 100:
+            del plugin_logs[:-100]
+        if progress_callback is not None:
+            progress_callback(payload)
+
+    try:
+        results = asyncio.run(
+            run_firm(firm, progress_callback=capture_progress)
+        )
+        return _FirmScrapeOutcome(
+            firm=firm,
+            started_at=started_at,
+            results=results,
+            logs=plugin_logs,
+        )
+    except Exception as exc:  # noqa: BLE001 - returned to the coordinator
+        return _FirmScrapeOutcome(
+            firm=firm,
+            started_at=started_at,
+            error=exc,
+            logs=plugin_logs,
+        )
+
+
+def _parallel_worker_count(firm_count: int) -> int:
+    try:
+        configured = int(os.getenv("SCRAPE_MAX_WORKERS", "3"))
+    except ValueError:
+        configured = 3
+    return max(1, min(firm_count, configured, 8))
+
+
+def _scrape_firms_parallel(
+    firms: Iterable[Any],
+    max_workers: int,
+) -> Iterator[_FirmScrapeOutcome]:
+    firm_list = list(firms)
+    with ThreadPoolExecutor(
+        max_workers=max_workers,
+        thread_name_prefix="firm-scraper",
+    ) as executor:
+        futures = [executor.submit(_run_firm_sync, firm) for firm in firm_list]
+        for future in as_completed(futures):
+            yield future.result()
+
+
 def run_scrape(
     db: Session,
     firm_key: str | None = None,
@@ -694,23 +764,39 @@ def run_scrape(
     first_error: str | None = None
     last_run: ScrapeRun | None = None
 
+    worker_count = _parallel_worker_count(len(firms)) if len(firms) > 1 else 1
+    start_message = f"Starting scrape for {label}..."
+    if len(firms) > 1:
+        start_message = (
+            f"Scraping {len(firms)} firms with up to "
+            f"{worker_count} running in parallel..."
+        )
+        logs.append(f"[{_ts()}] {start_message}")
+
     if progress_callback:
         progress_callback(
             {
                 "status": "running",
                 "label": label,
+                "current_firm": (
+                    f"{worker_count} firms in parallel"
+                    if len(firms) > 1
+                    else None
+                ),
                 "total_firms": len(firms),
                 "completed_firms": 0,
                 "percent": 5,
-                "current_firm_percent": 0,
-                "current_firm_stage": "Queued",
-                "message": f"Starting scrape for {label}...",
+                "current_firm_percent": 10 if len(firms) > 1 else 0,
+                "current_firm_stage": (
+                    "Parallel scrape" if len(firms) > 1 else "Queued"
+                ),
+                "message": start_message,
                 "logs": logs,
             }
         )
 
-    for index, f in enumerate(firms):
-        firm_started = _now()
+    if len(firms) == 1:
+        f = firms[0]
         firm_logs = [f"[{_ts()}] Starting scrape for {f.name}..."]
         if progress_callback:
             progress_callback(
@@ -719,8 +805,8 @@ def run_scrape(
                     "label": label,
                     "current_firm": f.name,
                     "total_firms": len(firms),
-                    "completed_firms": index,
-                    "percent": max(5, round((index / len(firms)) * 100)),
+                    "completed_firms": 0,
+                    "percent": 5,
                     "current_firm_percent": 15,
                     "current_firm_stage": "Scraping",
                     "jobs_found": total_found,
@@ -729,32 +815,52 @@ def run_scrape(
                     "logs": logs + firm_logs,
                 }
             )
-        try:
-            def on_plugin_progress(payload: dict[str, Any]) -> None:
-                if not progress_callback:
-                    return
-                firm_percent = max(15, min(70, int(payload.get("current_firm_percent", 15))))
-                progress_callback(
-                    {
-                        "status": "running",
-                        "label": label,
-                        "current_firm": f.name,
-                        "total_firms": len(firms),
-                        "completed_firms": index,
-                        "percent": max(
-                            5,
-                            round(((index + (firm_percent / 100 * 0.7)) / len(firms)) * 100),
-                        ),
-                        "current_firm_percent": firm_percent,
-                        "current_firm_stage": payload.get("current_firm_stage") or "Scraping",
-                        "jobs_found": total_found + int(payload.get("jobs_seen", 0) or 0),
-                        "errors": errors,
-                        "message": payload.get("message") or f"Scraping {f.name}...",
-                        "logs": logs + firm_logs + list(payload.get("logs") or []),
-                    }
-                )
 
-            results = asyncio.run(run_firm(f, progress_callback=on_plugin_progress))
+        def on_plugin_progress(payload: dict[str, Any]) -> None:
+            if not progress_callback:
+                return
+            firm_percent = max(
+                15,
+                min(70, int(payload.get("current_firm_percent", 15))),
+            )
+            progress_callback(
+                {
+                    "status": "running",
+                    "label": label,
+                    "current_firm": f.name,
+                    "total_firms": 1,
+                    "completed_firms": 0,
+                    "percent": max(5, round(firm_percent * 0.7)),
+                    "current_firm_percent": firm_percent,
+                    "current_firm_stage": (
+                        payload.get("current_firm_stage") or "Scraping"
+                    ),
+                    "jobs_found": int(payload.get("jobs_seen", 0) or 0),
+                    "errors": errors,
+                    "message": payload.get("message") or f"Scraping {f.name}...",
+                    "logs": (
+                        logs + firm_logs + list(payload.get("logs") or [])
+                    ),
+                }
+            )
+
+        outcomes: Iterable[_FirmScrapeOutcome] = [
+            _run_firm_sync(f, progress_callback=on_plugin_progress)
+        ]
+    else:
+        outcomes = _scrape_firms_parallel(firms, worker_count)
+
+    for completed_before, outcome in enumerate(outcomes):
+        f = outcome.firm
+        firm_started = outcome.started_at
+        firm_logs = [
+            f"[{_ts()}] Starting scrape for {f.name}...",
+            *outcome.logs,
+        ]
+        try:
+            if outcome.error is not None:
+                raise outcome.error
+            results = outcome.results or []
             if progress_callback:
                 progress_callback(
                     {
@@ -762,8 +868,13 @@ def run_scrape(
                         "label": label,
                         "current_firm": f.name,
                         "total_firms": len(firms),
-                        "completed_firms": index,
-                        "percent": max(10, round(((index + 0.6) / len(firms)) * 100)),
+                        "completed_firms": completed_before,
+                        "percent": max(
+                            10,
+                            round(
+                                ((completed_before + 0.8) / len(firms)) * 100
+                            ),
+                        ),
                         "current_firm_percent": 75,
                         "current_firm_stage": "Saving results",
                         "jobs_found": total_found,
@@ -799,8 +910,10 @@ def run_scrape(
                         "label": label,
                         "current_firm": f.name,
                         "total_firms": len(firms),
-                        "completed_firms": index + 1,
-                        "percent": round(((index + 1) / len(firms)) * 100),
+                        "completed_firms": completed_before + 1,
+                        "percent": round(
+                            ((completed_before + 1) / len(firms)) * 100
+                        ),
                         "current_firm_percent": 100,
                         "current_firm_stage": "Complete",
                         "jobs_found": total_found,
@@ -810,6 +923,7 @@ def run_scrape(
                     }
                 )
         except Exception as exc:  # noqa: BLE001 - record, don't crash the run
+            db.rollback()
             errors += 1
             if first_error is None:
                 first_error = str(exc)
@@ -834,8 +948,10 @@ def run_scrape(
                         "label": label,
                         "current_firm": f.name,
                         "total_firms": len(firms),
-                        "completed_firms": index + 1,
-                        "percent": round(((index + 1) / len(firms)) * 100),
+                        "completed_firms": completed_before + 1,
+                        "percent": round(
+                            ((completed_before + 1) / len(firms)) * 100
+                        ),
                         "current_firm_percent": 100,
                         "current_firm_stage": "Failed",
                         "jobs_found": total_found,
