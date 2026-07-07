@@ -6,8 +6,13 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
 
 from app.plugins.base import BasePlugin
+
+
+class WombleBondDickinsonScrapeError(RuntimeError):
+    pass
 
 
 class WombleBondDickinsonPlugin(BasePlugin):
@@ -21,6 +26,7 @@ class WombleBondDickinsonPlugin(BasePlugin):
     default_config: dict[str, Any] = {
         "source_url": careers_url,
         "max_pages": 0,
+        "safety_max_pages": 100,
         "timeout": 60,
     }
 
@@ -28,7 +34,40 @@ class WombleBondDickinsonPlugin(BasePlugin):
         source_url = str(self.plugin_config.get("source_url") or self.careers_url)
         timeout = int(self.plugin_config.get("timeout", 60))
         max_pages = int(self.plugin_config.get("max_pages", 0))
+        safety_max_pages = int(self.plugin_config.get("safety_max_pages", 100))
 
+        http_error: Exception | None = None
+        try:
+            return self._scrape_with_requests(
+                source_url=source_url,
+                timeout=timeout,
+                max_pages=max_pages,
+                safety_max_pages=safety_max_pages,
+            )
+        except Exception as exc:  # WBD sometimes blocks cloud HTTP clients.
+            http_error = exc
+
+        try:
+            return await self._scrape_with_browser(
+                source_url=source_url,
+                timeout=timeout,
+                max_pages=max_pages,
+                safety_max_pages=safety_max_pages,
+            )
+        except Exception as browser_error:
+            raise WombleBondDickinsonScrapeError(
+                "WBD HTTP scrape failed "
+                f"({http_error}); browser fallback also failed ({browser_error})"
+            ) from browser_error
+
+    def _scrape_with_requests(
+        self,
+        *,
+        source_url: str,
+        timeout: int,
+        max_pages: int,
+        safety_max_pages: int,
+    ) -> list[dict[str, Any]]:
         session = requests.Session()
         session.headers.update(
             {
@@ -37,7 +76,12 @@ class WombleBondDickinsonPlugin(BasePlugin):
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/137.0.0.0 Safari/537.36"
                 ),
-                "X-Requested-With": "XMLHttpRequest",
+                "Accept": (
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                    "*/*;q=0.8"
+                ),
+                "Accept-Language": "en-GB,en;q=0.9",
+                "Cache-Control": "no-cache",
             }
         )
 
@@ -55,6 +99,10 @@ class WombleBondDickinsonPlugin(BasePlugin):
         while next_url:
             if max_pages > 0 and page > max_pages:
                 break
+            if page > safety_max_pages:
+                raise WombleBondDickinsonScrapeError(
+                    f"WBD pagination exceeded safety_max_pages={safety_max_pages}"
+                )
 
             grid_response = session.get(
                 next_url,
@@ -65,18 +113,132 @@ class WombleBondDickinsonPlugin(BasePlugin):
                     "viewMode": "",
                     "inDialog": "false",
                 },
+                headers={
+                    "Accept": "text/html, */*; q=0.01",
+                    "Referer": response.url,
+                    "X-Requested-With": "XMLHttpRequest",
+                },
                 timeout=timeout,
             )
             self._prepare_response(grid_response)
             soup = BeautifulSoup(grid_response.text, "lxml")
             new_on_page = self._append_jobs(soup, grid_response.url, page, jobs, seen)
             if new_on_page == 0:
+                if page == 1:
+                    raise WombleBondDickinsonScrapeError(
+                        self._empty_response_message(grid_response, soup)
+                    )
                 break
 
             next_url = self._next_page_url(soup, grid_response.url)
             page += 1
 
+        if not jobs:
+            raise WombleBondDickinsonScrapeError(
+                "WBD returned no jobs from its results endpoint"
+            )
         return jobs
+
+    async def _scrape_with_browser(
+        self,
+        *,
+        source_url: str,
+        timeout: int,
+        max_pages: int,
+        safety_max_pages: int,
+    ) -> list[dict[str, Any]]:
+        timeout_ms = timeout * 1000
+        jobs: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(
+                headless=True,
+                args=["--disable-dev-shm-usage"],
+            )
+            try:
+                context = await browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (X11; Linux x86_64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/137.0.0.0 Safari/537.36"
+                    ),
+                    viewport={"width": 1440, "height": 1000},
+                    locale="en-GB",
+                )
+                page = await context.new_page()
+                page.set_default_timeout(timeout_ms)
+                await page.goto(source_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                await page.locator(".ListGridContainer .rowContainer").first.wait_for(
+                    state="attached",
+                    timeout=timeout_ms,
+                )
+
+                for page_number in range(1, safety_max_pages + 1):
+                    html = await page.content()
+                    soup = BeautifulSoup(html, "lxml")
+                    new_on_page = self._append_jobs(
+                        soup,
+                        page.url,
+                        page_number,
+                        jobs,
+                        seen,
+                    )
+                    if new_on_page == 0:
+                        raise WombleBondDickinsonScrapeError(
+                            f"WBD browser returned no new rows on page {page_number}"
+                        )
+
+                    if max_pages > 0 and page_number >= max_pages:
+                        break
+
+                    next_link = page.locator(
+                        ".pagingControls_Tiles a.scroller_movenext[href]"
+                    ).first
+                    if await next_link.count() == 0:
+                        break
+                    classes = set(
+                        (await next_link.get_attribute("class") or "").split()
+                    )
+                    is_disabled = (
+                        await next_link.get_attribute("disabled") is not None
+                        or "buttonDisabled" in classes
+                    )
+                    if is_disabled:
+                        break
+
+                    old_signature = await self._browser_page_signature(page)
+                    await next_link.click()
+                    await page.wait_for_function(
+                        """
+                        previous => {
+                            const current = Array.from(
+                                document.querySelectorAll('.ListGridContainer input.rowId[value]')
+                            ).map(element => element.value).join('|');
+                            return current && current !== previous;
+                        }
+                        """,
+                        arg=old_signature,
+                        timeout=timeout_ms,
+                    )
+                else:
+                    raise WombleBondDickinsonScrapeError(
+                        f"WBD browser pagination exceeded safety_max_pages={safety_max_pages}"
+                    )
+            finally:
+                await browser.close()
+
+        if not jobs:
+            raise WombleBondDickinsonScrapeError("WBD browser fallback returned no jobs")
+        return jobs
+
+    @staticmethod
+    async def _browser_page_signature(page: Any) -> str:
+        return await page.locator(
+            ".ListGridContainer input.rowId[value]"
+        ).evaluate_all(
+            "elements => elements.map(element => element.value).join('|')"
+        )
 
     def _append_jobs(
         self,
@@ -170,3 +332,20 @@ class WombleBondDickinsonPlugin(BasePlugin):
     def _prepare_response(response: requests.Response) -> None:
         response.raise_for_status()
         response.encoding = "utf-8"
+
+    @classmethod
+    def _empty_response_message(
+        cls,
+        response: requests.Response,
+        soup: BeautifulSoup,
+    ) -> str:
+        title = cls._clean(soup.title.get_text(" ", strip=True) if soup.title else None)
+        body_text = cls._clean(soup.get_text(" ", strip=True)) or ""
+        preview = body_text[:180]
+        cloudfront_pop = response.headers.get("x-amz-cf-pop") or "unknown"
+        return (
+            "WBD results endpoint returned no job rows "
+            f"(status={response.status_code}, bytes={len(response.content)}, "
+            f"url={response.url}, cloudfront_pop={cloudfront_pop}, "
+            f"title={title or 'none'}, preview={preview or 'empty'})"
+        )
