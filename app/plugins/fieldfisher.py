@@ -77,7 +77,7 @@ class FieldfisherPlugin(BasePlugin):
                 break
             search_data = {
                 "ClientID": client_id,
-                "OnboardingPageID": 0,
+                "OnboardingPageID": onboarding_page_id,
                 "CurrentPage": page,
                 "PageSearchResults": True,
                 "SearchResultPageSize": page_size,
@@ -164,11 +164,14 @@ class FieldfisherPlugin(BasePlugin):
 
     @staticmethod
     def _onboarding_page_id(html: str) -> int:
-        match = re.search(
-            r"InitialiseVacancySearch\([^)]*?,\s*\d+\s*,\s*(-?\d+)\s*\)",
-            html,
-        )
-        return int(match.group(1)) if match else 0
+        match = re.search(r"InitialiseVacancySearch\(([^)]*)\)", html)
+        if not match:
+            return 0
+        args = [part.strip() for part in match.group(1).split(",")]
+        try:
+            return int(args[-1])
+        except (IndexError, ValueError):
+            return 0
 
     @classmethod
     def _reference(cls, item: dict[str, Any], job_url: str | None) -> str | None:
