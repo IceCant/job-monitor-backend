@@ -22,6 +22,15 @@ class FakeFirm:
     key: str
     name: str
     enabled: bool = True
+    plugin_class: type | None = None
+
+
+class EmptyAllowedPlugin:
+    allow_empty_results = True
+
+
+class EmptyNotAllowedPlugin:
+    allow_empty_results = False
 
 
 class ParallelScrapingTests(unittest.TestCase):
@@ -130,6 +139,103 @@ class ParallelScrapingTests(unittest.TestCase):
             self.assertIn("2 running in parallel", progress_updates[0]["message"])
             self.assertEqual("success", progress_updates[-1]["status"])
             self.assertEqual(3, progress_updates[-1]["completed_firms"])
+        finally:
+            session.close()
+            engine.dispose()
+
+    def test_empty_results_still_fail_for_existing_jobs_by_default(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session = sessionmaker(bind=engine)()
+        firm = FakeFirm(
+            "empty",
+            "Empty Firm",
+            plugin_class=EmptyNotAllowedPlugin,
+        )
+
+        session.add(
+            Job(
+                firm_key=firm.key,
+                firm=firm.name,
+                title="Existing Role",
+                location="London",
+                status="LIVE",
+                job_url="https://example.com/jobs/existing",
+                match_key="ref:existing",
+                source_reference="existing",
+            )
+        )
+        session.commit()
+
+        async def fake_run_firm(firm, progress_callback=None):
+            return []
+
+        try:
+            with (
+                patch(
+                    "app.services.scraper_service.get_firm_definition",
+                    return_value=firm,
+                ),
+                patch(
+                    "app.services.scraper_service.run_firm",
+                    side_effect=fake_run_firm,
+                ),
+            ):
+                run = run_scrape(session, firm_key=firm.key, include_disabled=True)
+
+            job = session.query(Job).filter(Job.firm_key == firm.key).one()
+            self.assertEqual("failed", run.status)
+            self.assertEqual("LIVE", job.status)
+            self.assertIn("looks suspicious", run.error_message or "")
+        finally:
+            session.close()
+            engine.dispose()
+
+    def test_empty_results_can_remove_existing_jobs_when_plugin_allows_it(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session = sessionmaker(bind=engine)()
+        firm = FakeFirm(
+            "empty",
+            "Empty Firm",
+            plugin_class=EmptyAllowedPlugin,
+        )
+
+        session.add(
+            Job(
+                firm_key=firm.key,
+                firm=firm.name,
+                title="Existing Role",
+                location="London",
+                status="LIVE",
+                job_url="https://example.com/jobs/existing",
+                match_key="ref:existing",
+                source_reference="existing",
+            )
+        )
+        session.commit()
+
+        async def fake_run_firm(firm, progress_callback=None):
+            return []
+
+        try:
+            with (
+                patch(
+                    "app.services.scraper_service.get_firm_definition",
+                    return_value=firm,
+                ),
+                patch(
+                    "app.services.scraper_service.run_firm",
+                    side_effect=fake_run_firm,
+                ),
+            ):
+                run = run_scrape(session, firm_key=firm.key, include_disabled=True)
+
+            job = session.query(Job).filter(Job.firm_key == firm.key).one()
+            self.assertEqual("success", run.status)
+            self.assertEqual(0, run.jobs_found)
+            self.assertEqual("REMOVED", job.status)
+            self.assertIsNotNone(job.removed_at)
         finally:
             session.close()
             engine.dispose()

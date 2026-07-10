@@ -15,6 +15,7 @@ class BasePlugin(ABC):
     description = ""
     required_config: list[str] = []
     default_config: dict[str, Any] = {}
+    allow_empty_results = False
 
     def __init__(self, firm_name: str, plugin_config: dict[str, Any] | None = None, **kwargs: Any):
         self.firm_name = firm_name

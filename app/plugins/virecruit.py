@@ -19,6 +19,7 @@ class ViRecruitPlugin(BasePlugin):
     source_name = "virecruit_html"
     required_config = ["source_url"]
     default_config = {"timeout": 60}
+    allow_empty_results = True
 
     async def scrape(self) -> list[dict[str, Any]]:
         source_url = self.plugin_config.get("source_url") or self.careers_url
@@ -45,10 +46,13 @@ class ViRecruitPlugin(BasePlugin):
         if urlparse(response.url).hostname != expected_host or not soup.select_one("table.event-list"):
             response, soup = self._fetch_board(session, self.careers_url, timeout)
 
-        if not soup.select_one("table.event-list") and self._has_no_available_positions(soup):
+        table = soup.select_one("table.event-list")
+        no_available_positions = self._has_no_available_positions(soup)
+
+        if not table and no_available_positions:
             return []
 
-        if not soup.select_one("table.event-list"):
+        if not table:
             raise ValueError(f"{self.display_name} viRecruit job table was not found")
 
         board_url = response.url
@@ -88,6 +92,11 @@ class ViRecruitPlugin(BasePlugin):
                     },
                 }
             )
+
+        if not jobs and no_available_positions:
+            return []
+        if not jobs:
+            raise ValueError(f"{self.display_name} viRecruit job table had no parseable job rows")
 
         return jobs
 

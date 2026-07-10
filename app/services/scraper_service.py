@@ -281,6 +281,11 @@ def _prepare_result(firm, result: JobResult) -> dict[str, Any]:
     }
 
 
+def _allows_empty_results(firm: Any) -> bool:
+    plugin_class = getattr(firm, "plugin_class", None)
+    return bool(getattr(plugin_class, "allow_empty_results", False))
+
+
 def _build_indexes(existing_jobs: list[Job]) -> dict[str, Any]:
     by_url: dict[str, list[Job]] = defaultdict(list)
     by_ref: dict[str, list[Job]] = defaultdict(list)
@@ -490,7 +495,7 @@ def persist_scrape(db: Session, firm, results) -> dict:
 
     existing_jobs: list[Job] = list(db.query(Job).filter(Job.firm_key == firm.key).all())
     active_before = [job for job in existing_jobs if job.status != STATUS_REMOVED]
-    if active_before and not results:
+    if active_before and not results and not _allows_empty_results(firm):
         raise ValueError("Scrape returned no jobs; removals skipped because the result looks suspicious")
 
     indexes = _build_indexes(existing_jobs)
