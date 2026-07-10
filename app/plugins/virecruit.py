@@ -45,6 +45,9 @@ class ViRecruitPlugin(BasePlugin):
         if urlparse(response.url).hostname != expected_host or not soup.select_one("table.event-list"):
             response, soup = self._fetch_board(session, self.careers_url, timeout)
 
+        if not soup.select_one("table.event-list") and self._has_no_available_positions(soup):
+            return []
+
         if not soup.select_one("table.event-list"):
             raise ValueError(f"{self.display_name} viRecruit job table was not found")
 
@@ -99,6 +102,11 @@ class ViRecruitPlugin(BasePlugin):
         response.raise_for_status()
         response.encoding = "utf-8"
         return response, BeautifulSoup(response.text, "html.parser")
+
+    @classmethod
+    def _has_no_available_positions(cls, soup: BeautifulSoup) -> bool:
+        text = cls._clean(soup.get_text(" ", strip=True)) or ""
+        return "there are no available positions" in text.casefold()
 
     @classmethod
     def _meta(cls, row: Tag) -> dict[str, str]:
