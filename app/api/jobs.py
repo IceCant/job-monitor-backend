@@ -1,5 +1,7 @@
 import io
 import json
+import re
+import unicodedata
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -47,6 +49,61 @@ FILTER_COLUMNS = {
     "removed_at": ("date", Job.removed_at),
 }
 
+LOCATION_SUFFIXES = {
+    "australia",
+    "belgium",
+    "california",
+    "canada",
+    "england",
+    "france",
+    "germany",
+    "hong kong sar",
+    "illinois",
+    "ireland",
+    "italy",
+    "luxembourg",
+    "massachusetts",
+    "netherlands",
+    "new south wales",
+    "new york",
+    "poland",
+    "singapore",
+    "spain",
+    "switzerland",
+    "texas",
+    "united arab emirates",
+    "united kingdom",
+    "united states",
+    "united states of america",
+    "usa",
+    "victoria",
+}
+
+LOCATION_ALIASES = {
+    "dc": "Washington DC",
+    "washington": "Washington DC",
+    "washington dc": "Washington DC",
+    "washington d c": "Washington DC",
+    "dusseldorf": "Dusseldorf",
+    "frankfurt am main": "Frankfurt",
+    "hong kong sar": "Hong Kong",
+}
+
+LOCATION_SEARCH_ALIASES = {
+    "dusseldorf": ["Düsseldorf"],
+    "frankfurt": ["Frankfurt am Main"],
+    "hong kong": ["Hong Kong SAR"],
+    "washington dc": [
+        "DC",
+        "Washington",
+        "Washington DC",
+        "Washington DC, USA",
+        "Washington, DC",
+        "Washington, D.C.",
+        "Washington, United States",
+    ],
+}
+
 
 def _history_out(db: Session, job_id: int) -> list[JobHistoryEntry]:
     rows = (
@@ -78,7 +135,7 @@ def _filtered_query(
     search: str | None,
     status: str | None,
     firm: str | None,
-    location: str | None,
+    location: list[str] | str | None,
     changed_only: bool,
     seen_from: datetime | None,
     seen_to: datetime | None,
@@ -106,14 +163,9 @@ def _filtered_query(
         query = query.filter(Job.status == status.upper())
     if firm and firm.lower() != "all":
         query = query.filter(or_(Job.firm == firm, Job.firm_key == firm))
-    if location and location.lower() != "all":
-        location_like = f"%{location}%"
-        query = query.filter(
-            or_(
-                Job.location.ilike(location_like),
-                cast(Job.extra_info["locations"], String).ilike(location_like),
-            )
-        )
+    location_filters = _location_filter_values(location)
+    if location_filters:
+        query = _apply_location_filters(query, location_filters)
     if changed_only:
         query = query.filter(Job.status.in_(["UPDATED", "REPOSTED", "NEEDS_REVIEW"]))
     if seen_from is not None:
@@ -138,7 +190,7 @@ def _filtered_query(
 def _location_parts(value: str | None) -> list[str]:
     if not value:
         return []
-    return [part.strip() for part in value.split(";") if part.strip()]
+    return [_clean_location(part) for part in value.split(";") if _clean_location(part)]
 
 
 def _extra_location_parts(extra_info: Any) -> list[str]:
@@ -150,7 +202,97 @@ def _extra_location_parts(extra_info: Any) -> list[str]:
             return []
     if not isinstance(locations, list):
         return []
-    return [str(location).strip() for location in locations if str(location).strip()]
+    return [_clean_location(location) for location in locations if _clean_location(location)]
+
+
+def _clean_location(value: Any) -> str:
+    text = " ".join(str(value).replace("\xa0", " ").split())
+    return text.strip(" ,;") if text else ""
+
+
+def _location_key(value: str) -> str:
+    text = unicodedata.normalize("NFKD", value)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    text = text.casefold()
+    text = text.replace("&", " and ")
+    text = re.sub(r"\b(?:d\s*\.?\s*c\.?|districtofcolumbia)\b", "dc", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def _canonical_location_label(value: str) -> str:
+    text = _clean_location(value)
+    if not text:
+        return ""
+
+    text = re.sub(r"\s*\((?:hybrid|remote|onsite|on-site)\)\s*$", "", text, flags=re.IGNORECASE)
+    text = text.strip(" ,;")
+
+    for office_prefix in ("London", "Los Angeles", "New York"):
+        if text.casefold().startswith(f"{office_prefix.casefold()} - "):
+            text = office_prefix
+            break
+
+    parts = [_clean_location(part) for part in text.split(",") if _clean_location(part)]
+    while len(parts) > 1 and _location_key(parts[-1]) in LOCATION_SUFFIXES:
+        parts.pop()
+    if len(parts) == 2 and _location_key(parts[0]) == _location_key(parts[1]):
+        parts.pop()
+
+    text = ", ".join(parts) if parts else text
+    key = _location_key(text)
+    return LOCATION_ALIASES.get(key, text)
+
+
+def _location_filter_values(location: list[str] | str | None) -> list[str]:
+    if location is None:
+        return []
+    raw_values = location if isinstance(location, list) else [location]
+    values: list[str] = []
+    seen: set[str] = set()
+    for raw_value in raw_values:
+        clean_value = _clean_location(raw_value)
+        if not clean_value or clean_value.casefold() == "all":
+            continue
+        if clean_value.casefold() in seen:
+            continue
+        seen.add(clean_value.casefold())
+        values.append(clean_value)
+    return values
+
+
+def _location_search_terms(value: str) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def add(term: str) -> None:
+        clean_term = _clean_location(term)
+        key = clean_term.casefold()
+        if clean_term and key not in seen:
+            seen.add(key)
+            terms.append(clean_term)
+
+    canonical = _canonical_location_label(value)
+    add(value)
+    add(canonical)
+    for alias in LOCATION_SEARCH_ALIASES.get(_location_key(canonical), []):
+        add(alias)
+    return terms
+
+
+def _apply_location_filters(query, locations: list[str]):
+    predicates = []
+    extra_locations = cast(Job.extra_info["locations"], String)
+    for location in locations:
+        for term in _location_search_terms(location):
+            location_like = f"%{term}%"
+            predicates.extend(
+                [
+                    Job.location.ilike(location_like),
+                    extra_locations.ilike(location_like),
+                ]
+            )
+    return query.filter(or_(*predicates)) if predicates else query
 
 
 def _sorted_query(query, sort_by: str | None, sort_direction: str | None):
@@ -189,6 +331,9 @@ def _apply_field_filter(query, field: str, operator: str, value: str | None):
 
     if not normalized_value:
         return query
+
+    if field == "location" and normalized_operator in {"contains", "equals"}:
+        return _apply_location_filters(query, [normalized_value])
 
     if column_type == "date":
         date_value = _parse_filter_date(normalized_value)
@@ -263,7 +408,7 @@ def list_jobs(
     search: str | None = None,
     status: str | None = None,
     firm: str | None = None,
-    location: str | None = None,
+    location: list[str] | None = Query(default=None),
     changed_only: bool = False,
     seen_from: datetime | None = None,
     seen_to: datetime | None = None,
@@ -328,19 +473,25 @@ def list_job_location_options(
         .distinct()
         .all()
     )
-    options = sorted(
-        {
-            location_part
-            for (raw_location,) in location_rows
-            for location_part in _location_parts(raw_location)
-        }
-        | {
-            location_part
-            for (extra_info_locations,) in extra_location_rows
-            for location_part in _extra_location_parts(extra_info_locations)
-        },
-        key=str.casefold,
-    )
+    location_counts: dict[str, int] = {}
+    for (raw_location,) in location_rows:
+        for location_part in _location_parts(raw_location):
+            label = _canonical_location_label(location_part)
+            if label:
+                location_counts[label] = location_counts.get(label, 0) + 1
+    for (extra_info_locations,) in extra_location_rows:
+        for location_part in _extra_location_parts(extra_info_locations):
+            label = _canonical_location_label(location_part)
+            if label:
+                location_counts[label] = location_counts.get(label, 0) + 1
+
+    options = [
+        label
+        for label, _ in sorted(
+            location_counts.items(),
+            key=lambda item: (-item[1], item[0].casefold()),
+        )
+    ]
     return {"items": options}
 
 
@@ -350,7 +501,7 @@ def export_jobs(
     search: str | None = None,
     status: list[str] | None = Query(default=None),
     firm: list[str] | None = Query(default=None),
-    location: str | None = None,
+    location: list[str] | None = Query(default=None),
     changed_only: bool = False,
     seen_from: datetime | None = None,
     seen_to: datetime | None = None,
