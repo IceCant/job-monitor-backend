@@ -41,10 +41,25 @@ def init_db():
     db = SessionLocal()
     try:
         if db.query(User).count() == 0:
+            app_env = (
+                os.getenv("APP_ENV")
+                or os.getenv("ENVIRONMENT")
+                or os.getenv("FASTAPI_ENV")
+                or ""
+            ).lower()
+            admin_username = os.getenv("JOBMONITOR_ADMIN_USERNAME", "admin")
+            admin_password = os.getenv("JOBMONITOR_ADMIN_PASSWORD")
+            if not admin_password:
+                if app_env in {"prod", "production", "staging"}:
+                    raise RuntimeError(
+                        "JOBMONITOR_ADMIN_PASSWORD must be set before starting "
+                        "with an empty users table in production."
+                    )
+                admin_password = "admin123"
             db.add(
                 User(
-                    username="admin",
-                    password_hash=hash_password("admin123"),
+                    username=admin_username,
+                    password_hash=hash_password(admin_password),
                     role="admin",
                 )
             )
